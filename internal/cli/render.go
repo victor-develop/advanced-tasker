@@ -56,6 +56,7 @@ func newRenderCmd(opts *Options) *cobra.Command {
 		},
 	}
 	c.AddCommand(dashCmd, briefCmd)
+	callAttachers(opts, c)
 	return c
 }
 

@@ -63,6 +63,29 @@ func ValidJobID(id string) bool {
 	return jobIDPattern.MatchString(id)
 }
 
+// NewJobID returns a fresh J-<short-uuid>.
+func NewJobID() (string, error) {
+	s, err := ShortUUID()
+	if err != nil {
+		return "", err
+	}
+	return "J-" + s, nil
+}
+
+// NewOutboxID returns a fresh O-<short-uuid>.
+func NewOutboxID() (string, error) {
+	s, err := ShortUUID()
+	if err != nil {
+		return "", err
+	}
+	return "O-" + s, nil
+}
+
+// ValidOutboxID returns true iff id matches the O-<short-uuid> form.
+func ValidOutboxID(id string) bool {
+	return strings.HasPrefix(id, "O-") && len(id) > 2
+}
+
 // ShortUUID returns a short lowercase hex random identifier.
 func ShortUUID() (string, error) {
 	b := make([]byte, 4)

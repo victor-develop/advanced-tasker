@@ -107,6 +107,17 @@ func (r Repo) IndexClean() (bool, error) {
 	return false, fmt.Errorf("git diff --cached: %w", err)
 }
 
+// ShowAt returns the content of path at the given revision (e.g. "HEAD"
+// or "HEAD~1"). Returns an error if the path or revision does not
+// exist.
+func (r Repo) ShowAt(rev, path string) (string, error) {
+	out, err := r.run("show", fmt.Sprintf("%s:%s", rev, path))
+	if err != nil {
+		return "", err
+	}
+	return out, nil
+}
+
 // HeadSHA returns the current HEAD commit SHA, or empty string if no
 // commits exist yet.
 func (r Repo) HeadSHA() (string, error) {

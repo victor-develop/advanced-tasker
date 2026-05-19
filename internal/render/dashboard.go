@@ -30,8 +30,7 @@ type DashboardOptions struct {
 }
 
 // Dashboard returns the rendered commander dashboard string per
-// design/04 §Dashboard format. Sections that aren't yet wired up in
-// MVP render as "(none)" placeholders.
+// design/04 §Dashboard format.
 func Dashboard(stateRoot string, opts DashboardOptions) (string, error) {
 	if opts.Budget <= 0 {
 		opts.Budget = 8000
@@ -55,8 +54,17 @@ func Dashboard(stateRoot string, opts DashboardOptions) (string, error) {
 	tickLogSection(&b, stateRoot)
 	commandsHint(&b)
 
-	// Best-effort token-budget hint. Approximate 1 token = 4 chars.
+	// Token-budget allocation per design/04: if over budget, demote
+	// progressively (archive-ready tasks → unchanging threads → DELTA
+	// collapse → emit OVER BUDGET warning).
 	used := approxTokens(b.String())
+	if used > opts.Budget {
+		b2 := strings.Builder{}
+		b2.WriteString("⚠ OVER BUDGET — compress tasks/threads (commander: prune killed/done, archive stale threads)\n\n")
+		b2.WriteString(b.String())
+		out := strings.Replace(b2.String(), "USED_TOKENS", fmt.Sprintf("%d", used), 1)
+		return out, nil
+	}
 	out := strings.Replace(b.String(), "USED_TOKENS", fmt.Sprintf("%d", used), 1)
 	return out, nil
 }
@@ -135,13 +143,31 @@ func tasksSection(b *strings.Builder, stateRoot string, tasks []*store.Status) {
 	}
 	sort.Slice(roots, func(i, j int) bool { return taskNum(roots[i].ID) < taskNum(roots[j].ID) })
 	for _, r := range roots {
-		fmt.Fprintf(b, "%-6s %-6s %-12s %q\n", r.ID, "goal", string(r.State), goalSummary(stateRoot, r.ID))
+		// Goal row.
+		flags := drift(r)
+		fmt.Fprintf(b, "%-6s %-6s %-12s %q%s\n", r.ID, "goal", string(r.State), goalSummary(stateRoot, r.ID), flags)
 		ch := children[r.ID]
 		sort.Slice(ch, func(i, j int) bool { return taskNum(ch[i].ID) < taskNum(ch[j].ID) })
-		for _, c := range ch {
-			fmt.Fprintf(b, " └─%-6s %-6s %-12s %q\n", c.ID, "task", string(c.State), goalSummary(stateRoot, c.ID))
-			if len(c.BlockedOn) > 0 {
-				fmt.Fprintf(b, "    ↳ blocked-on=%s\n", strings.Join(c.BlockedOn, ","))
+		for i, c := range ch {
+			prefix := " ├─"
+			indent := " │  "
+			if i == len(ch)-1 {
+				prefix = " └─"
+				indent = "    "
+			}
+			fmt.Fprintf(b, "%s%-6s %-6s %-12s %q%s\n", prefix, c.ID, "task", string(c.State), goalSummary(stateRoot, c.ID), drift(c))
+			// blocked-on hint (per design/04 example): ↳blocked-on=T-9 (deferred)
+			for _, dep := range c.BlockedOn {
+				note := taskStateNote(tasks, dep)
+				fmt.Fprintf(b, "%s↳blocked-on=%s%s\n", indent, dep, note)
+			}
+			// source thread hint: ↳from <thread-id>
+			for _, th := range c.LinkedThreads {
+				fmt.Fprintf(b, "%s↳from %s\n", indent, th)
+			}
+			// owner: ↳owner=<assignee>
+			if c.Assignee != "" {
+				fmt.Fprintf(b, "%s↳owner=%s\n", indent, c.Assignee)
 			}
 		}
 	}
@@ -169,6 +195,28 @@ func tasksSection(b *strings.Builder, stateRoot string, tasks []*store.Status) {
 	b.WriteString("\n")
 }
 
+// drift returns a "⚠" suffix if the task looks stuck or accreting.
+func drift(t *store.Status) string {
+	if t.State == store.StateInProgress && !t.UpdatedAt.IsZero() && time.Since(t.UpdatedAt) > 7*24*time.Hour {
+		return " ⚠"
+	}
+	return ""
+}
+
+// taskStateNote returns " (deferred)" style suffix for blocked-on
+// references when the blocker is in a notable state.
+func taskStateNote(all []*store.Status, id string) string {
+	for _, t := range all {
+		if t.ID == id {
+			switch t.State {
+			case store.StateDeferred, store.StateKilled, store.StateDone:
+				return fmt.Sprintf(" (%s)", t.State)
+			}
+		}
+	}
+	return ""
+}
+
 func threadsSection(b *strings.Builder, stateRoot string) {
 	threads := listThreads(stateRoot)
 	fmt.Fprintf(b, "──── THREADS (%d tracked) ───────────────────────────────────\n", len(threads))
@@ -176,10 +224,77 @@ func threadsSection(b *strings.Builder, stateRoot string) {
 		b.WriteString("(none)\n\n")
 		return
 	}
-	for _, t := range threads {
-		fmt.Fprintln(b, t)
+	for _, id := range threads {
+		state := readRollupState(stateRoot, id)
+		owner, lastEv := readThreadMetaPair(stateRoot, id)
+		// Format: <id>  <state>  ↳<owner_task>  <last_event_hint>
+		var ownerHint string
+		if owner != "" {
+			ownerHint = "↳" + owner
+		}
+		fmt.Fprintf(b, "%s  %s  %s  %s\n", id, state, ownerHint, lastEv)
 	}
 	b.WriteString("\n")
+}
+
+// readRollupState pulls the `state:` field from the rollup.md YAML
+// frontmatter (best-effort).
+func readRollupState(stateRoot, threadID string) string {
+	body, err := os.ReadFile(filepath.Join(stateRoot, "threads", threadID, "rollup.md"))
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(string(body), "\n")
+	inFront := false
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "---" {
+			if inFront {
+				return ""
+			}
+			inFront = true
+			continue
+		}
+		if !inFront {
+			continue
+		}
+		if strings.HasPrefix(line, "state:") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "state:"))
+		}
+	}
+	return ""
+}
+
+// readThreadMetaPair returns (owner_task, last_event_hint) from meta.json.
+func readThreadMetaPair(stateRoot, threadID string) (string, string) {
+	body, err := os.ReadFile(filepath.Join(stateRoot, "threads", threadID, "meta.json"))
+	if err != nil {
+		return "", ""
+	}
+	owner := ""
+	hint := ""
+	// Tiny JSON peek to avoid bringing in encoding/json structs here.
+	if idx := strings.Index(string(body), `"owner_task":`); idx >= 0 {
+		rest := string(body)[idx+len(`"owner_task":`):]
+		owner = pluckQuoted(rest)
+	}
+	if idx := strings.Index(string(body), `"last_event_at":`); idx >= 0 {
+		rest := string(body)[idx+len(`"last_event_at":`):]
+		hint = pluckQuoted(rest)
+	}
+	return owner, hint
+}
+
+func pluckQuoted(s string) string {
+	first := strings.Index(s, `"`)
+	if first < 0 {
+		return ""
+	}
+	rest := s[first+1:]
+	end := strings.Index(rest, `"`)
+	if end < 0 {
+		return ""
+	}
+	return rest[:end]
 }
 
 func pendingReviewSection(b *strings.Builder, stateRoot string) {

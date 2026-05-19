@@ -49,7 +49,7 @@ func New() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.PersistentFlags().StringVar(&opts.StateRoot, "state", "", "override state directory (default $HARNESS_STATE or ./state)")
+	root.PersistentFlags().StringVar(&opts.StateRoot, "state-dir", "", "override state directory (default $HARNESS_STATE or ./state)")
 	root.PersistentFlags().BoolVar(&opts.JSON, "json", false, "emit machine-readable output")
 	root.PersistentFlags().BoolVar(&opts.DryRun, "dry-run", false, "print intended actions without applying")
 
@@ -64,6 +64,30 @@ func New() *cobra.Command {
 		newDepsCmd(opts),
 		newRenderCmd(opts),
 		newPickupCmd(opts),
+		newInboxCmd(opts),
+		newTriageCmd(opts),
+		newDispatchCmd(opts),
+		newJobCmd(opts),
+		newSubmitReportCmd(opts),
+		newReviewCmd(opts),
+		newClaimCmd(opts),
+		newReleaseCmd(opts),
+		newOutboxCmd(opts),
+		newRollupCmd(opts),
+		newTickCmd(opts),
+		newTickLogCmd(opts),
+		newEngineCmd(opts),
+		newTelemetryCmd(opts),
+		newDoctorCmd(opts),
+		newAutopilotCmd(opts),
+		newAuditCmd(opts),
+		newAuditDaemonCmd(opts),
+		newWatchCmd(opts),
+		newUnwatchCmd(opts),
+		newSourcesCmd(opts),
+		newPinCmd(opts),
+		newNoteCmd(opts),
+		newThreadCmd(opts),
 	)
 	return root
 }

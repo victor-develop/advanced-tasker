@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/victor-develop/advanced-tasker/internal/audit"
 	"github.com/victor-develop/advanced-tasker/internal/gitops"
 )
 
@@ -42,21 +43,43 @@ var Layout = []string{
 	"roles",
 }
 
-// DefaultConfigYAML mirrors design/02 §config.yaml.
+// DefaultConfigYAML mirrors design/02 §config.yaml + design/10 fields.
 const DefaultConfigYAML = `mode: hybrid
 git:
   auto_commit: true
 models:
+  driver: claude-p
   commander: claude-opus-4-7
   updater: claude-haiku-4-5
   worker_default: claude-sonnet-4-6
+  auditor: claude-haiku-4-5
 limits:
   dashboard_token_budget: 8000
   rollup_current_ask_max_lines: 3
   rollup_open_questions_max_lines: 5
   outbox_per_thread_per_hour: 5
+  outbox_per_channel_per_hour: 20
+  outbox_global_per_hour: 100
+  outbox_high_risk_require_human: true
+  outbox_revoke_window: 5m
 pins:
   default_ttl: 7d
+schedule:
+  active_window:
+    timezone: Asia/Singapore
+    start: "08:00"
+    end:   "20:00"
+    interval: 3m
+  inactive_window:
+    interval: 30m
+  event_triggered: true
+  event_min_gap: 30s
+audit:
+  cadence: 4h
+  problems_escalate_to_human: true
+  watch_only_to_commander: true
+rollup:
+  debounce: 30s
 sources:
   slack:
     enabled: true
@@ -85,13 +108,49 @@ config.local.yaml
 .env.*
 `
 
-// postCommitHook is a placeholder; the real ledger/pin guards belong to
-// A7 (rollup updater) per design/05. We install a no-op hook here so
-// `harness init` matches the layout in design/10.
+// postCommitHook re-runs the rollup ledger + human-pin guards against
+// HEAD~1..HEAD as belt-and-suspenders per design/05 §Step 5. The shell
+// hook invokes the harness binary which holds the validator logic
+// (so the rules live in one place).
+//
+// On violation: the hook calls `git reset --hard HEAD~1` and drops an
+// anomaly. We only run when HEAD touched a tracked rollup.md.
 const postCommitHook = `#!/bin/sh
-# Placeholder post-commit hook installed by ` + "`harness init`" + `.
-# The rollup updater (Track A, deliverable A7) will replace this with
-# the ledger/pin diff validator described in design/05.
+# state/.git/hooks/post-commit — installed by ` + "`harness init`" + `.
+# Re-runs the rollup append-only ledger + human-pin guards against
+# HEAD~1..HEAD per design/05 §"Post-commit hook re-validates".
+
+set -e
+
+# Find the harness binary. Honor $HARNESS_BIN if set, else PATH.
+HARNESS_BIN="${HARNESS_BIN:-harness}"
+if ! command -v "$HARNESS_BIN" >/dev/null 2>&1; then
+  exit 0  # No harness binary available (e.g. during init); skip.
+fi
+
+# Skip if this is the very first commit (no HEAD~1).
+if ! git rev-parse --verify -q HEAD~1 >/dev/null 2>&1; then
+  exit 0
+fi
+
+CHANGED=$(git diff --name-only HEAD~1 HEAD | grep -E '^threads/.*/rollup\.md$' || true)
+if [ -z "$CHANGED" ]; then
+  exit 0
+fi
+
+STATE_DIR=$(pwd)
+for f in $CHANGED; do
+  if ! "$HARNESS_BIN" --state-dir "$STATE_DIR" rollup verify-commit --file "$f" >/tmp/harness-hook.err 2>&1; then
+    echo "post-commit hook: rollup violation in $f — reverting last commit" >&2
+    cat /tmp/harness-hook.err >&2
+    git reset --hard HEAD~1
+    mkdir -p "$STATE_DIR/inbox/anomalies"
+    cat >"$STATE_DIR/inbox/anomalies/post-commit-$(date -u +%Y%m%dT%H%M%S).json" <<EOF
+{"source":"post-commit-hook","summary":"rollup ledger/pin violation in $f","detail_path":"/tmp/harness-hook.err"}
+EOF
+    exit 1
+  fi
+done
 exit 0
 `
 
@@ -152,6 +211,11 @@ func Init(root string) error {
 		if err := os.WriteFile(fp, []byte(body), 0o644); err != nil {
 			return fmt.Errorf("write role %s: %w", name, err)
 		}
+	}
+
+	// Seed audit/checklist.yaml.
+	if err := os.WriteFile(filepath.Join(abs, "audit", "checklist.yaml"), []byte(audit.DefaultChecklist), 0o644); err != nil {
+		return fmt.Errorf("write audit checklist: %w", err)
 	}
 
 	// Drop a .gitkeep in every otherwise-empty git-tracked directory so

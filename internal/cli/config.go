@@ -87,6 +87,7 @@ func newConfigCmd(opts *Options) *cobra.Command {
 			},
 		},
 	)
+	addConfigInitSubcommand(c, opts)
 	return c
 }
 
