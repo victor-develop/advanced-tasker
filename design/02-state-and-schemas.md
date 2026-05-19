@@ -42,21 +42,33 @@ state/
 ├── sources/
 │   ├── slack/                  # poller cursors + config
 │   └── github/
+├── audit/
+│   ├── checklist.yaml          # what the auditor checks (editable)
+│   └── reports/                # past audit reports (git-tracked)
+│       └── <iso-timestamp>.md
+├── telemetry/                  # captured stream-json from each tick (gitignored)
+│   ├── ticks/<iso>.jsonl
+│   ├── workers/<job-id>.jsonl
+│   └── summary.log             # one-line cost/duration/exit per run
 └── roles/                      # worker role definitions (system prompts)
     ├── pr-reviewer.md
     ├── slack-drafter.md
     ├── planner.md
     ├── researcher.md
-    └── summarizer.md           # rollup updater role
+    ├── summarizer.md           # rollup updater role
+    └── auditor.md              # audit agent role
 ```
 
-Items under `inbox/`, `jobs/`, `outbox/` are short-lived; they are NOT
-checked into git (see [01-overview.md](./01-overview.md) P5 — git tracks the
-durable world model, not transient queues). The `.gitignore` inside `state/`
-excludes them.
+Items under `inbox/`, `jobs/`, `outbox/pending|awaiting-human|failed/`, and
+`telemetry/` are short-lived; they are NOT checked into git (see
+[01-overview.md](./01-overview.md) P5 — git tracks the durable world model,
+not transient queues). The `.gitignore` inside `state/` excludes them.
 
-Items under `threads/`, `tasks/`, `tick-log/`, `roles/`, and `config.yaml`
-ARE git-tracked.
+Items under `threads/`, `tasks/`, `tick-log/`, `audit/reports/`,
+`outbox/sent/`, `roles/`, and `config.yaml` ARE git-tracked.
+
+`telemetry/` is gitignored because it can grow large (per-tick stream-json
+captures). Rotate/archive via `harness telemetry rotate` if needed.
 
 ## ID conventions
 
@@ -180,11 +192,29 @@ existing call sites. Configurable max_retries.
   "assignee": "commander",
   "created_at": "2026-05-14T08:00:00Z",
   "updated_at": "2026-05-19T09:30:00Z",
-  "due_at": "2026-05-22T17:00:00Z"
+  "due_at": "2026-05-22T17:00:00Z",
+  "on_complete": ["unblock:T-15", "notify:thread:github-acme-api-pr-1284"],
+  "on_kill": ["unblock:T-15"]
 }
 ```
 
 `state` enum: `ready`, `in-progress`, `blocked`, `deferred`, `done`, `killed`.
+
+### Declarative completion hooks
+
+`on_complete` and `on_kill` are arrays of side-effect specs that the CLI
+executes automatically when `harness task check` (state → `done`) or
+`harness task kill` is called. Supported specs:
+
+| Spec | Effect |
+|---|---|
+| `unblock:T-<n>` | Remove the current task from `T-<n>.blocked_on`; if it was the only blocker, transition `T-<n>` from `blocked` → `ready` |
+| `notify:thread:<id>` | Enqueue an outbox draft (low-risk) acknowledging completion in the thread (commander still reviews unless config says auto-send) |
+| `dispatch:<role>:<task>` | Queue a worker job (still subject to commander review on next tick) |
+
+These run inside the CLI transaction, in the same git commit as the
+status change. If a hook fails (e.g., target task doesn't exist), the
+whole mutation aborts with exit 2.
 
 ## tasks/&lt;id&gt;/log.md
 
@@ -328,6 +358,10 @@ Risk semantics: see [07-outbox.md](./07-outbox.md).
 tick_id: 2026-05-19T10-23-00Z
 duration_ms: 4321
 commander_model: claude-opus-4-7
+cost_usd: 0.42
+idle: false             # true if no state-changing actions taken
+consecutive_idle: 0     # running counter; resets when idle=false
+session_id: <opaque ID from driver, optional>
 ---
 
 ## What I saw

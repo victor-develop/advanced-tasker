@@ -32,11 +32,18 @@ harness watch github-repo acme/api
 harness goal create "Improve ingest reliability"
 # → returns T-1
 
-# 6. Choose driver mode
+# 6. Set scheduler cadence (active vs inactive windows)
+harness config set schedule.active_window.timezone Asia/Singapore
+harness config set schedule.active_window.start 08:00
+harness config set schedule.active_window.end   20:00
+harness config set schedule.active_window.interval 3m
+harness config set schedule.inactive_window.interval 30m
+
+# 7. Choose driver mode
 harness config set mode hybrid    # autopilot | manual | hybrid
 harness autopilot start            # if mode != manual
 
-# 7. (Optional) Sanity check
+# 8. (Optional) Sanity check
 harness pickup
 harness render dashboard
 ```
@@ -85,15 +92,44 @@ Daemons run autonomously:
   model, writes new rollup via CLI
 - `worker-runner` — watches `jobs/pending/`, claims jobs, invokes
   Sonnet-class model with `harness render worker-input`, submits report
-- `commander-scheduler` — triggers commander tick on:
-  - Every N minutes (configurable, default 1h)
-  - Inbox delta exceeding threshold (e.g., 3 new items)
-  - Worker report submission
+- `commander-scheduler` — triggers commander tick per cadence
+  ([see design/04 §Cadence](./04-commander-tick.md#cadence-autopilot-scheduler)):
+  - Two-band time window (active vs inactive), separate intervals
+  - Event triggers: inbox delta, worker report ready (debounced)
 - `outbox-sender` — watches `outbox/pending/`, sends, moves to `sent/`
+- `audit-daemon` — periodic meta-review (Haiku-class), much slower
+  cadence than commander ([see design/11](./11-audit-agent.md))
 
 All daemons run as goroutines in one `harness autopilot` process, OR as
 separate processes managed externally (systemd, launchd, supervisor) — TBD
 per implementer; goroutine model is simpler for v1.
+
+### Telemetry capture (autopilot only)
+
+The scheduler invokes `claude -p` with `--output-format stream-json
+--verbose` and tees the JSONL output to:
+
+```
+state/telemetry/ticks/<iso-timestamp>.jsonl
+```
+
+After the process exits, the scheduler:
+1. Parses the final `{"type":"result", ...}` line
+2. Extracts `total_cost_usd`, `duration_ms`, `is_error`, `session_id`
+3. Calls `harness tick end --idle|--summary --cost-usd <f> --duration-ms <i>`
+   (the commander's own final action also calls `tick end`; the
+   scheduler's call is a safety net that respects whichever fired
+   first — same end state)
+4. Appends a one-line summary to `state/telemetry/summary.log`:
+   ```
+   2026-05-19T10:23Z tick    cost=$0.42  dur=4321ms  err=false  session=...
+   ```
+
+The worker daemon does the same for each worker invocation, writing to
+`state/telemetry/workers/<job-id>.jsonl` and `summary.log`.
+
+This costs essentially nothing and gives `harness telemetry cost` real
+data day one.
 
 ### `manual`
 
@@ -150,6 +186,52 @@ harness config set mode hybrid
 ```
 
 State is unchanged across mode switches. No restart required.
+
+## Human intervention — three tiers
+
+Three escalating ways for a human to inject intent. Use the lightest one
+that fits.
+
+### Tier 1 — drop an inbox directive (no interruption)
+```
+echo "Push PR-1284 today; defer T-9." | harness pin --scope T-12 --ttl 3d
+# or just write a file under state/inbox/human/ with frontmatter
+```
+The commander sees this on its next scheduled tick. Lowest disruption,
+fully audited.
+
+### Tier 2 — directly mutate state via CLI (immediate, no LLM)
+```
+harness task kill T-3 --reason "scope cut"
+harness task defer T-9 --until 2026-06-01
+harness outbox revoke O-xyz789
+```
+No tick required; the change is committed. The next commander tick
+sees the new state in DELTA. Use when you know exactly what should
+change and don't need agent judgment.
+
+### Tier 3 — take over the commander seat (heaviest)
+```
+harness autopilot pause
+harness claim commander --as=victor --ttl=15m
+harness render dashboard
+# ... read, run harness verbs as you see fit, drive a full tick by hand ...
+harness tick end --summary "manual tick: rebalanced priorities after
+                            customer call"
+harness release commander
+harness autopilot resume
+```
+Use when the model is clearly off the rails and you want to reset the
+trajectory before the next autopilot tick. Tier 3 is the equivalent of
+sitting in the chair. State is unchanged across the takeover; the next
+autopilot tick continues from where you left off.
+
+**An alternative for debugging only:** some drivers (notably
+`claude -p`) support `--resume <session-id>` to continue a prior LLM
+session. We do **not** recommend this in production — fresh ticks from
+the dashboard are the design — but during debugging, attaching to the
+most recent tick's session lets you observe the LLM's reasoning. The
+session ID is in the tick-log frontmatter.
 
 ## Health checks
 

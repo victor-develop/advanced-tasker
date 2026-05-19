@@ -147,12 +147,21 @@ harness pickup                            # list available roles, no advice
 
 harness tick start --as <agent-id> [--ttl 10m]
   # Claims the commander lock. Returns the dashboard prompt on stdout.
+  # Also runs a "due-hook audit": checks every active hook/poller's
+  # last-run timestamp against its expected window; any that missed
+  # are surfaced at the top of the dashboard so the commander sees
+  # missed signals before acting.
 
 harness tick-log append "<text>"
   # Appends to the current tick's log file.
 
-harness tick end [--summary "..."]
-  # Closes the tick: writes summary, releases lock, commits tick-log.
+harness tick end [--idle | --summary "..."] [--cost-usd <f>] [--duration-ms <i>]
+  # Closes the tick: writes tick-log file, releases lock, commits.
+  # --idle marks the tick as no-op (no state-changing actions taken)
+  # and increments engine.consecutive_idle. Without --idle,
+  # consecutive_idle resets to 0. The driver (autopilot or external)
+  # passes --cost-usd and --duration-ms when available, parsed from
+  # the LLM's stream-json output. See design/10 for capture details.
 ```
 
 ## Render commands (for non-mutating prompt assembly)
@@ -182,13 +191,66 @@ existing in-flight jobs continue.
 ## Lock / claim mechanics
 
 ```
-harness claim commander --as=<agent-id> [--ttl 10m]
-harness claim job J-<id> --as=<agent-id> [--ttl 30m]
+harness claim commander --as=<agent-id> [--ttl 10m] [--pid <pid>]
+harness claim job J-<id> --as=<agent-id> [--ttl 30m] [--pid <pid>]
 harness release commander
 harness release job J-<id>
 ```
 
 Leases are TTL'd. Expired leases auto-release on next claim attempt.
+
+### PID-aware stale-lock detection
+When a claim is attempted on a slot already held, the CLI first checks:
+1. If `lease_until` is in the past → reclaim (auto-release)
+2. If `pid` is recorded and `kill -0 <pid>` fails (process gone) →
+   reclaim immediately, log a stale-lock anomaly
+3. Otherwise → exit 3 (contention)
+
+This dual mechanism (TTL + PID liveness) prevents both indefinite hangs
+(if a process dies fast) and premature reclaims (if a slow process is
+still alive past its TTL — though that itself merits investigation).
+
+## Audit
+
+```
+harness audit run [--model haiku]
+   # Run one audit immediately. Writes a report to state/audit/reports/
+   # and an anomaly to state/inbox/anomalies/.
+
+harness audit ls
+harness audit show <audit-id>
+harness audit checklist edit
+
+harness audit-daemon start|stop|status
+   # In autopilot, the audit daemon. Cadence configured in config.yaml.
+```
+
+See [11-audit-agent.md](./11-audit-agent.md).
+
+## Telemetry
+
+```
+harness telemetry ls
+harness telemetry show <tick-id|job-id>
+harness telemetry rotate [--older-than 7d]
+   # Move old stream-json captures out of state/telemetry/.
+
+harness telemetry cost [--since <iso>]
+   # Aggregate cost from telemetry/summary.log.
+```
+
+## Engine state
+
+```
+harness engine status
+   # Show consecutive_idle, total_cycles, last_activated, mode.
+
+harness engine idle-tick
+   # Sugar over `tick end --idle` for non-tick increments (rare).
+
+harness engine idle-reset
+   # Reset consecutive_idle to 0. Manual override.
+```
 
 ## Source management (poller-facing)
 

@@ -20,7 +20,11 @@ Read in this order:
 9. **[09-github-poller.md](./09-github-poller.md)** — Track C spec
    (isolated).
 10. **[10-bootstrap-and-driver-modes.md](./10-bootstrap-and-driver-modes.md)**
-    — Day-1 init flow + autopilot/manual/hybrid driver modes.
+    — Day-1 init flow + autopilot/manual/hybrid driver modes + three
+    tiers of human intervention.
+11. **[11-audit-agent.md](./11-audit-agent.md)** — Audit agent: a
+    read-only meta-monitor (cheap model) that watches the commander for
+    drift, stuck state, and anti-patterns.
 
 ## How to use these docs
 

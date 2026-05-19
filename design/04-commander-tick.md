@@ -16,11 +16,14 @@ This sequence MUST be encoded in the dashboard prompt header so the
 commander follows it deterministically.
 
 ### Phase 1 — Survey (cheap, mandatory)
-1. Read **PINNED banner** (active human pins, sorted by priority)
-2. Read **DELTA section** (what changed since last tick)
-3. Read **Tasks table** (every active task, one row)
-4. Read **Threads table** (every tracked thread, one row)
-5. Read **Pending review** (worker reports awaiting decision)
+1. Read **HOOK AUDIT banner** (any due hook/poller that missed its window
+   since last tick — `harness tick start` populates this so the commander
+   sees missed signals first, not the agent itself running hooks)
+2. Read **PINNED banner** (active human pins, sorted by priority)
+3. Read **DELTA section** (what changed since last tick)
+4. Read **Tasks table** (every active task, one row)
+5. Read **Threads table** (every tracked thread, one row)
+6. Read **Pending review** (worker reports awaiting decision)
 
 ### Phase 2 — Drill (selective, expensive)
 6. For any row that looks suspect or has high-impact delta, run `harness
@@ -47,12 +50,31 @@ commander follows it deterministically.
 ### Phase 5 — Log + exit
 15. `harness tick-log append "..."` — write a short narrative of what was
     seen and decided. This is the only "message to future self."
-16. `harness tick end --summary "..."` — releases commander lock, commits
-    tick-log file.
+16. End the tick with one of:
+    - `harness tick end --summary "..."` — at least one state-changing
+      action was taken; resets `consecutive_idle` to 0
+    - `harness tick end --idle` — nothing actionable; increments
+      `consecutive_idle`. Skip writing a tick-log file (the idle counter
+      is the message).
+
+    A "state-changing action" means any commit-producing CLI verb invoked
+    in this tick. Reading and drilling do not count. Phase 4 dispatches,
+    reviews, or task mutations do count.
+
+    The driver SHOULD pass `--cost-usd` and `--duration-ms` if it captured
+    them from stream-json output. These land in the tick-log frontmatter
+    and the telemetry summary.
 
 The phases are NOT optional. Skipping Phase 1 leads to the commander acting
 on stale partial information. Skipping Phase 5 leads to the next tick
 losing context for "why is this task still here."
+
+### Why explicit idle marking matters
+Without `--idle`, the difference between "I considered everything and
+chose to do nothing" and "I forgot to do anything" is invisible. The
+counter makes pure-watch ticks first-class and feeds drift detection: a
+rising `consecutive_idle` is either a sign that cadence is too fast or
+that the commander has gone quiet.
 
 ## Dashboard format
 
@@ -140,6 +162,28 @@ When over budget, the renderer demotes:
 4. Last resort: emit warning at top of dashboard "OVER BUDGET — compress
    tasks/threads"
 
+## Cadence (autopilot scheduler)
+
+The autopilot scheduler triggers commander ticks. Config:
+
+```yaml
+schedule:
+  active_window:                 # e.g. SGT 08:00 → 20:00
+    timezone: Asia/Singapore
+    start: "08:00"
+    end:   "20:00"
+    interval: 3m                 # tick every 3 minutes
+  inactive_window:
+    interval: 30m                # tick every 30 minutes
+  event_triggered: true          # also fire on inbox delta / job done
+  event_min_gap: 30s             # debounce events to avoid storms
+```
+
+Real-world signal volume is uneven: heavy during work hours, quiet
+overnight. A fixed cadence either wastes tokens at night or misses
+signals by day. Two-band cadence is cheap to implement and a known
+working shape from prior-art implementations.
+
 ## Drift detection
 
 Each tick's dashboard renderer compares against last tick's:
@@ -147,9 +191,14 @@ Each tick's dashboard renderer compares against last tick's:
   "task accretion"
 - If a thread's state hasn't moved in N days → flag "stuck"
 - If pending review queue grows tick-over-tick → flag "review backlog"
+- If `consecutive_idle` exceeds threshold (default 8) → flag "idle drift"
 
 Flags appear inline (`⚠`) — they are signals to the commander, not
 automatic actions.
+
+The audit agent (see [11-audit-agent.md](./11-audit-agent.md)) provides a
+slower, deeper check of the same dimensions plus several the commander
+can't see in its single-tick view.
 
 ## Multiple commanders / coordination
 

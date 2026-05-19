@@ -31,9 +31,12 @@ effect through a single CLI.**
 | Rollup updater | Every Δ ≥ threshold | Small (Haiku-class) | Maintain structured per-thread summary |
 | Worker | On dispatch | Mid (Sonnet-class) | Execute a bounded task and return a structured report |
 | Commander | Periodic + event-triggered | Top (Opus-class) | Re-survey the world, reshape plans, dispatch workers |
+| Auditor | Slow (every N hours) | Small (Haiku-class) | Read-only meta-review of commander behavior, flag drift |
 
-The commander is the expensive one and runs **least often**. Most cycles are
-small-model summarization and IO.
+The commander is the expensive one and runs **least often** among LLM
+agents that act. The auditor runs even less often, but exists precisely
+*because* the commander cannot reliably audit itself. See
+[11-audit-agent.md](./11-audit-agent.md).
 
 ## Core architectural principles
 
@@ -106,26 +109,26 @@ touching state.
    │  threads/ tasks/ inbox/ jobs/ outbox/ ...   │
    └────────┬──────────┬──────────┬──────────────┘
             │          │          │
-   reads    │          │          │  reads + writes
-            ▼          ▼          ▼
-   ┌─────────────┐ ┌──────────┐ ┌──────────┐
-   │ rollup      │ │ worker   │ │ commander│
-   │ updater     │ │ (async)  │ │ (tick)   │
-   │ (daemon)    │ │ (daemon) │ │          │
-   └─────────────┘ └────┬─────┘ └────┬─────┘
-                        │            │
-                        └──┬─────────┘  side effects via
-                           ▼            harness CLI only
-                     ┌──────────────┐
-                     │ harness CLI  │
-                     │ (Track A)    │
-                     └──────┬───────┘
-                            ▼
-                     ┌──────────────┐
-                     │ outbox       │
-                     │ (sends to    │
-                     │ Slack/GH)    │
-                     └──────────────┘
+   reads    │          │          │     reads-only       reads + writes
+            ▼          ▼          ▼          ▼
+   ┌─────────────┐ ┌──────────┐ ┌─────────┐ ┌──────────┐
+   │ rollup      │ │ worker   │ │ auditor │ │ commander│
+   │ updater     │ │ (async)  │ │ (slow,  │ │ (tick)   │
+   │ (daemon)    │ │ (daemon) │ │ readonly)│ │          │
+   └─────────────┘ └────┬─────┘ └────┬────┘ └────┬─────┘
+                        │            │            │
+                        └──────┬─────┴────────────┘  side effects via
+                               ▼                     harness CLI only
+                        ┌──────────────┐
+                        │ harness CLI  │
+                        │ (Track A)    │
+                        └──────┬───────┘
+                               ▼
+                        ┌──────────────┐
+                        │ outbox       │
+                        │ (sends to    │
+                        │ Slack/GH)    │
+                        └──────────────┘
 ```
 
 ## What this design explicitly is NOT

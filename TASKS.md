@@ -68,9 +68,23 @@ target deliverable. Tracks can be built independently and integrated later.
 
 **A8. Autopilot driver**
 - Scheduler that triggers commander ticks via `claude -p`
+- Two-band cadence (active/inactive time windows) per
+  [design/04 §Cadence](./design/04-commander-tick.md#cadence-autopilot-scheduler)
+- Stream-json output capture → `state/telemetry/ticks/*.jsonl` +
+  cost/duration parsed into tick-log and `summary.log`
 - Worker daemon that picks up jobs and runs them as `claude -p`
 - `harness autopilot start|stop|pause|resume`
+- PID-aware claim/release with `kill -0` stale-lock detection
 - Acceptance: dry-run mode that prints intended subprocess calls
+
+**A9. Audit agent + daemon**
+- `harness audit run` invokes Haiku-class model with read-only role,
+  writes report to `state/audit/reports/` + anomaly to inbox
+- Audit checklist (signals computed in Go; LLM writes narrative)
+- `harness audit-daemon` schedules audits on slow cadence (default 4h
+  or every 6 commander ticks)
+- See [design/11-audit-agent.md](./design/11-audit-agent.md)
+- Acceptance: stub mode produces a valid report file without LLM call
 
 ### Track A non-goals
 - Do not implement Slack or GitHub API calls (Tracks B and C)
