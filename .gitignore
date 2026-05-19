@@ -1,0 +1,24 @@
+# Runtime state (created by `harness init`, usually outside the source tree)
+/state/
+/.harness/
+
+# Build artifacts
+/bin/
+/dist/
+*.exe
+*.test
+
+# Go
+vendor/
+
+# Local config
+*.local.yaml
+*.local.toml
+.env
+.env.*
+
+# Editor
+.idea/
+.vscode/
+*.swp
+.DS_Store
