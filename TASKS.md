@@ -21,10 +21,18 @@ target deliverable. Tracks can be built independently and integrated later.
 ### Deliverables (MVP order)
 
 **A1. Repo skeleton + state init**
-- Go module, `cmd/harness/main.go`, subcommand framework (cobra or stdlib)
-- `harness init` creates state/ directory and runs `git init` inside it
-- `harness config get|set` reads/writes a YAML config file under state/
-- Acceptance: empty dir → `harness init` → valid state/ with .git
+- Go module, `cmd/harness/main.go`, subcommand framework (cobra preferred)
+- Global flag is `--state-dir <path>` (NOT `--state` — that name is taken by
+  several subcommands' local `--state <enum>` argument; see design/03)
+- `harness init` creates state/ directory, runs `git init` inside it, seeds
+  default `config.yaml`, all roles/*.md, audit/checklist.yaml, and installs
+  the post-commit hook for ledger/pin guards (see design/05, design/10)
+- `harness config get|set` reads/writes the YAML config file under state/
+- `harness config init <source>` seeds `state/sources/<source>/config.yaml`
+  with a documented stub (source ∈ {slack, github}); idempotent — re-running
+  does not overwrite. See design/03 + design/10.
+- Acceptance: empty dir → `harness init` → valid state/ with .git; then
+  `harness config init slack` → `state/sources/slack/config.yaml` exists
 
 **A2. Task and goal CRUD**
 - `harness goal create`, `harness task create|update|kill|defer|split|merge`
@@ -60,22 +68,44 @@ target deliverable. Tracks can be built independently and integrated later.
 
 **A7. Rollup updater driver**
 - Daemon that watches `state/threads/<id>/.dirty` and invokes the configured
-  summarizer LLM with old rollup + new raw messages
-- `git commit` hook validates ledger-append-only + pinned lines preserved;
-  on violation, `git reset --hard` and write to `inbox/anomalies/`
-- Acceptance: integration test with a mock updater that tries to delete a
-  ledger entry → CLI must reject
+  summarizer LLM (via the LLM Driver interface — see design/10 §"LLM driver
+  interface") with old rollup + new raw messages
+- The CLI verb `harness rollup update <id> --file=<path>` is the daemon's
+  entry point; it runs the validation pipeline from design/05 and emits
+  `inbox/updates/<id>-<sha>.json` on success
+- Post-commit hook validates ledger-append-only + human-pinned lines
+  preserved; on violation, `git reset --hard HEAD~1` and write to
+  `inbox/anomalies/`
+- Acceptance: integration test using the `fake` LLM driver where the
+  scripted output tries to delete a ledger entry → CLI must reject with
+  exit 2 + anomaly file
 
 **A8. Autopilot driver**
-- Scheduler that triggers commander ticks via `claude -p`
-- Two-band cadence (active/inactive time windows) per
-  [design/04 §Cadence](./design/04-commander-tick.md#cadence-autopilot-scheduler)
+- All LLM invocations go through the LLM Driver interface
+  (design/10 §"LLM driver interface"). The `claude-p` driver is for
+  production; the `fake` driver is for tests and `--driver fake` runs.
+- Scheduler triggers commander ticks via `Driver.Invoke(role=commander)`
+- Two-band cadence (active/inactive time windows) per design/04 §Cadence
 - Stream-json output capture → `state/telemetry/ticks/*.jsonl` +
-  cost/duration parsed into tick-log and `summary.log`
-- Worker daemon that picks up jobs and runs them as `claude -p`
-- `harness autopilot start|stop|pause|resume`
+  cost/duration parsed via the driver's `InvokeResult` into tick-log
+  frontmatter and `summary.log`
+- `worker-runner` daemon picks up `jobs/pending/`, claims, invokes
+  `Driver.Invoke(role=worker)` with the rendered worker input, validates
+  submit-report
+- `rollup-updater` daemon (the A7 daemon, scheduled in the autopilot
+  process)
+- `outbox-sender` daemon (the A6 daemon)
+- `audit-daemon` (the A9 daemon)
+- `harness autopilot start|stop|pause|resume`; supports
+  `--driver {claude-p|fake}` and `--duration <go-duration>` (the
+  duration flag only meaningful with `--driver fake` or under
+  `HARNESS_TEST_DURATION`, bounds the autopilot lifetime so acceptance
+  scripts can exercise the loop in seconds)
 - PID-aware claim/release with `kill -0` stale-lock detection
-- Acceptance: dry-run mode that prints intended subprocess calls
+- Acceptance: `harness autopilot start --driver fake --duration 60s`
+  exercises commander tick + worker dispatch + rollup updater + outbox
+  queueing end-to-end with no panic and `harness doctor` reporting
+  state clean afterwards
 
 **A9. Audit agent + daemon**
 - `harness audit run` invokes Haiku-class model with read-only role,
@@ -100,7 +130,10 @@ target deliverable. Tracks can be built independently and integrated later.
 
 **B1. `slack-poller` binary**
 - Standalone Go binary (or subcommand of `harness`, TBD by core team)
-- Reads `state/sources/slack/config.yaml` for tracked channels + auth
+- Reads `state/sources/slack/config.yaml` for tracked channels + auth.
+  Config is seeded by Track A's `harness config init slack`. If the file
+  is missing, exit 1 with the message: "run `harness config init slack`
+  to seed config" — never auto-create a non-functional default.
 - Maintains per-channel and per-thread cursors
 
 **B2. Two-level polling**
@@ -145,7 +178,9 @@ target deliverable. Tracks can be built independently and integrated later.
 
 **C1. `github-poller` binary**
 - Reads `state/sources/github/config.yaml` for tracked repos + auth (PAT or
-  GH App)
+  GH App). Config is seeded by Track A's `harness config init github`. If
+  the file is missing, exit 1 with: "run `harness config init github` to
+  seed config" — never auto-create a non-functional default.
 
 **C2. Multi-source polling per PR**
 - PR review comments (`/pulls/{n}/comments`)

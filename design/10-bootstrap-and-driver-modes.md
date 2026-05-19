@@ -24,7 +24,9 @@ export ANTHROPIC_API_KEY=sk-ant-...
 # Or:
 harness config set --local secrets.slack_bot_token xoxb-...   # written to config.local.yaml, gitignored
 
-# 4. Register sources to watch
+# 4. Seed source configs, then register sources to watch
+harness config init slack         # writes state/sources/slack/config.yaml stub
+harness config init github        # writes state/sources/github/config.yaml stub
 harness watch slack-channel C0492 --reason "data team alerts"
 harness watch github-repo acme/api
 
@@ -57,22 +59,25 @@ on demand for manual mode).
 ```
 state/
 ├── .git/                                 ← git init
-├── .gitignore                            ← excludes inbox/, jobs/, outbox/, etc.
-├── .git/hooks/post-commit                ← installs ledger guards
+├── .gitignore                            ← excludes inbox/, jobs/, outbox/pending|*|failed/, telemetry/
+├── .git/hooks/post-commit                ← installs ledger + human-pin guards
 ├── config.yaml                           ← default config (see 02)
 ├── roles/
 │   ├── pr-reviewer.md                    ← seeded role prompts
 │   ├── slack-drafter.md
 │   ├── planner.md
 │   ├── researcher.md
-│   └── summarizer.md
+│   ├── summarizer.md
+│   └── auditor.md
+├── audit/{checklist.yaml, reports/}      ← seeded default checklist (design/11)
 ├── threads/                              ← empty
 ├── tasks/                                ← empty
 ├── inbox/{new,updates,human,agent-reports,anomalies}/
 ├── jobs/{pending,in-flight,done,failed}/
 ├── outbox/{pending,awaiting-human,sent,failed}/
 ├── tick-log/                             ← empty
-└── sources/{slack,github}/{cursors,config.yaml}
+├── telemetry/{ticks,workers}/            ← empty, gitignored
+└── sources/{slack,github}/cursors/       ← directories only
 ```
 
 Then:
@@ -81,6 +86,13 @@ $ cd state && git add -A && git commit -m "harness init"
 ```
 
 Tracked items are committed; queue items are gitignored.
+
+**Note: `state/sources/<source>/config.yaml` is NOT created by
+`harness init`.** Source configs are opt-in: run `harness config init slack`
+and/or `harness config init github` to seed them. The poller binaries
+MUST error helpfully (exit 1, message "run `harness config init <source>`
+to seed config") when the file is absent — never auto-create a
+non-functional default at poll time, and never silently no-op.
 
 ## Driver modes
 
@@ -103,6 +115,89 @@ Daemons run autonomously:
 All daemons run as goroutines in one `harness autopilot` process, OR as
 separate processes managed externally (systemd, launchd, supervisor) — TBD
 per implementer; goroutine model is simpler for v1.
+
+### LLM driver interface
+
+Every place the harness invokes an LLM (commander tick, rollup updater,
+worker, audit) goes through one Go interface so the loop is testable
+without network calls and the driver is swappable:
+
+```go
+// internal/llm/driver.go
+package llm
+
+import "context"
+
+type Role string  // "commander" | "updater" | "worker" | "auditor"
+
+type InvokeOptions struct {
+    Role           Role          // selects model + stream-json capture path
+    Model          string        // override (else config.yaml model for the role)
+    SystemPrompt   string        // optional; appended to the role prompt
+    Timeout        time.Duration // hard cutoff
+    StreamJSONPath string        // if non-empty, tee raw stream-json to this file
+}
+
+type InvokeResult struct {
+    Output       string   // the LLM's final textual output
+    SessionID    string   // opaque, from stream-json result event (empty if N/A)
+    CostUSD      float64  // parsed from stream-json result event (0 if N/A)
+    DurationMS   int64
+    IsError      bool
+    RawArtifact  string   // path to the captured JSONL (== StreamJSONPath when set)
+}
+
+type Driver interface {
+    // Invoke runs one bounded LLM call. Prompt is the full prompt to send;
+    // for commander ticks this is the rendered dashboard. The driver MUST
+    // be re-entrant and safe for concurrent calls from different roles.
+    Invoke(ctx context.Context, prompt string, opts InvokeOptions) (InvokeResult, error)
+
+    // Name returns the driver's stable identifier ("claude-p", "fake", etc.)
+    Name() string
+}
+```
+
+Two implementations ship in v1:
+
+**`claude-p`** — execs `claude -p --print --output-format stream-json
+--verbose` (or the equivalent for `worker` role: `claude -p --print
+--system-prompt <roles/...>`). Stdin gets `prompt`, stdout JSONL is teed
+to `StreamJSONPath`, the final `{"type":"result", ...}` line is parsed
+into `InvokeResult`. Used by autopilot in production.
+
+**`fake`** — deterministic, scripted driver for tests and `--driver fake`
+acceptance runs. Reads scripted responses from
+`state/.test/fake-driver/<role>/<call-index>.txt` (or a per-test fixture
+dir passed via option). Records each Invoke into an in-memory log
+inspectable via `Driver.(*Fake).Calls()`. No subprocess, no network.
+Tests targeting the loop (autopilot, rollup updater, worker runner,
+audit) use this driver exclusively.
+
+Configuration (in `state/config.yaml`):
+
+```yaml
+models:
+  driver: claude-p           # claude-p | fake
+  commander: claude-opus-4-7
+  updater: claude-haiku-4-5
+  worker_default: claude-sonnet-4-6
+  auditor: claude-haiku-4-5
+```
+
+The driver is selected once at process start; long-running daemons do
+not hot-swap drivers. To swap, restart the autopilot.
+
+CLI override for ad-hoc runs:
+
+```
+harness autopilot start --driver fake [--duration 60s]
+```
+
+The `--driver` flag wins over `config.yaml`. The `--duration` flag (only
+honored with `--driver fake`, or under `HARNESS_TEST_DURATION`) bounds
+the autopilot lifetime so acceptance scripts can exercise the full loop
+in seconds.
 
 ### Telemetry capture (autopilot only)
 
