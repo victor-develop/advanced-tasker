@@ -328,17 +328,32 @@ directory"). Track A's `harness triage` should read `raw_inline` for
 slack items if going with design/08; otherwise we need a small follow-up
 to add a `raw_path` field.
 
-### 2. `harness config init slack` exact stub shape
+### 2. `harness config init slack` exact stub shape — RESOLVED
 
-The brief says "verify by reading harness-core-r2's
-`coordination/from-harness-core.md` — if their stub doesn't match what
-your loader expects, flag in your own coordination notes; do NOT
-silently change your loader." At the time of writing this note, Track A
-round 2 had not pushed `coordination/from-harness-core.md` (or any
-round-2 commits). I have NOT changed my loader. If the lead can ping
-harness-core-r2 to push their stub generator's output verbatim into
-their coordination notes, I'll do a follow-up compatibility check before
-PR #2 merges.
+**Update after Track A pushed `coordination/from-harness-core.md`:**
+Track A's stub is
+
+```yaml
+auth:
+  token_env: SLACK_BOT_TOKEN
+watch:
+  channels: []
+poll_interval: 30s
+```
+
+This is **compatible** with my loader. `applyDefaults` fills the missing
+`max_concurrent_thread_polls` (4) and `backoff.{on_rate_limit,on_error,
+max_backoff}` (60s, 5s, 5m). My `Validate` only fails on a non-empty
+channel with empty id, so `watch.channels: []` validates fine. No loader
+change needed.
+
+Their `harness watch slack-channel <id> [--reason ...]` writes
+`{id, reason?}` mappings into `watch.channels`, matching my
+`WatchedChannel` struct. Atomic-write semantics not explicitly
+documented on their side, but they git-commit each mutation so torn
+writes can be diagnosed via `git status` / `git diff`. My
+`slack-poller watch/unwatch` uses `SaveConfig` which does atomic
+`.tmp` → rename. Mixing both verbs on the same machine should be safe.
 
 ### 3. `slack-poller status` and `harness watch` ownership overlap
 
