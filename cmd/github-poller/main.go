@@ -12,16 +12,37 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
 
 	ghp "github.com/victor-develop/advanced-tasker/internal/github"
 	cli "github.com/victor-develop/advanced-tasker/internal/github/cli"
 )
 
 func main() {
+	root, _ := newRootCmd()
+	if err := root.Execute(); err != nil {
+		// ErrConfigMissing was already printed verbatim by the run /
+		// force-poll handlers; don't double-print.  See the round-2
+		// agent brief: "exit 1 with the literal message".
+		if !errors.Is(err, ghp.ErrConfigMissing) {
+			fmt.Fprintln(os.Stderr, "error:", err)
+		}
+		os.Exit(cli.ExitCodeFor(err))
+	}
+}
+
+// newRootCmd builds the cobra tree and returns it along with a pointer to
+// the resolved state-root string (so unit tests can inject SetArgs and
+// assert the flag plumbing without spawning the binary).
+//
+// `--state-dir` is the canonical global flag name across the project (per
+// design PR #4 — matches harness CLI and slack-poller).  `--state-root`
+// is preserved as a backwards-compatible alias for round-1 callers
+// (scripts/smoke.sh, anyone with shell history).  Whichever the operator
+// passes wins; if both are passed `--state-dir` wins because it's the
+// canonical name.
+func newRootCmd() (*cobra.Command, *string) {
 	root := &cobra.Command{
 		Use:   "github-poller",
 		Short: "Track C: GitHub PR ingestion daemon and lifecycle CLI",
@@ -40,16 +61,30 @@ Lifecycle subcommands (C6):
 		SilenceErrors: true,
 	}
 
-	var stateRoot string
-	root.PersistentFlags().StringVar(&stateRoot, "state-root", "state",
-		"path to state/ directory (alias: --state-dir for harness CLI consistency)")
-	// Accept --state-dir as an alias.  See design/03 §"Global flags".
-	root.PersistentFlags().SetNormalizeFunc(func(_ *pflag.FlagSet, name string) pflag.NormalizedName {
-		if strings.EqualFold(name, "state-dir") {
-			return pflag.NormalizedName("state-root")
+	// Both flags are registered with separate storage slots; a
+	// PersistentPreRunE picks the one the operator actually set and
+	// copies it to `stateRoot`, which the subcommands close over.
+	const defaultStateDir = "state"
+	stateRoot := defaultStateDir
+	var stateDirFlag, stateRootFlag string
+	root.PersistentFlags().StringVar(&stateDirFlag, "state-dir", defaultStateDir,
+		"path to state/ directory (canonical, matches harness CLI)")
+	root.PersistentFlags().StringVar(&stateRootFlag, "state-root", defaultStateDir,
+		"alias of --state-dir (kept for round-1 backwards compatibility)")
+
+	root.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
+		dirSet := cmd.Flags().Changed("state-dir")
+		rootSet := cmd.Flags().Changed("state-root")
+		switch {
+		case dirSet:
+			stateRoot = stateDirFlag
+		case rootSet:
+			stateRoot = stateRootFlag
+		default:
+			stateRoot = defaultStateDir
 		}
-		return pflag.NormalizedName(name)
-	})
+		return nil
+	}
 
 	runCmd := cli.NewRunCmd(&stateRoot)
 	root.AddCommand(runCmd)
@@ -67,13 +102,5 @@ Lifecycle subcommands (C6):
 	root.Flags().AddFlagSet(runCmd.Flags())
 	root.RunE = runCmd.RunE
 
-	if err := root.Execute(); err != nil {
-		// ErrConfigMissing was already printed verbatim by the run /
-		// force-poll handlers; don't double-print.  See the round-2
-		// agent brief: "exit 1 with the literal message".
-		if !errors.Is(err, ghp.ErrConfigMissing) {
-			fmt.Fprintln(os.Stderr, "error:", err)
-		}
-		os.Exit(cli.ExitCodeFor(err))
-	}
+	return root, &stateRoot
 }
