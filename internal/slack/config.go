@@ -85,10 +85,25 @@ func (d Duration) MarshalYAML() (any, error) {
 	return d.Duration.String(), nil
 }
 
-// LoadConfig reads a YAML config from path and applies defaults.
+// ErrConfigMissing is returned by LoadConfig when the configured path does
+// not exist. The poller maps this to the literal user-facing message
+// required by design/03 + design/10:
+//
+//	run 'harness config init slack' to seed config
+//
+// Callers MUST exit 1 with that message rather than auto-creating a default
+// config at poll time.
+var ErrConfigMissing = errors.New("run 'harness config init slack' to seed config")
+
+// LoadConfig reads a YAML config from path and applies defaults. Returns
+// ErrConfigMissing if the file does not exist; the CLI surface relies on
+// this sentinel.
 func LoadConfig(path string) (*Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, ErrConfigMissing
+		}
 		return nil, fmt.Errorf("read config %s: %w", path, err)
 	}
 	cfg := &Config{}
@@ -154,6 +169,19 @@ func (c *Config) ResolveToken() (string, error) {
 		return string(trimNewline(b)), nil
 	}
 	return "", errors.New("no Slack bot token: set auth.token_env, auth.token_file, or auth.token")
+}
+
+// SaveConfig writes a YAML config atomically. Used by the watch/unwatch
+// subcommands to mutate state/sources/slack/config.yaml.
+func SaveConfig(path string, cfg *Config) error {
+	b, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	if err := atomicWrite(path, b, 0o644); err != nil {
+		return fmt.Errorf("write config %s: %w", path, err)
+	}
+	return nil
 }
 
 func trimNewline(b []byte) []byte {

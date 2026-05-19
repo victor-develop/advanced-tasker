@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
+	"time"
 
 	sgs "github.com/slack-go/slack"
 )
@@ -89,16 +91,59 @@ func (m Message) IsTopLevelInThread() bool {
 // SlackGoClient is an APIClient backed by github.com/slack-go/slack.
 type SlackGoClient struct {
 	C *sgs.Client
+	// LastResponseHeaders stores the most recent HTTP response headers seen
+	// from Slack. Used to surface Retry-After info on 429 errors. Best
+	// effort; not thread-safe across distinct call sites.
+	LastResponseHeaders http.Header
+}
+
+// SlackGoClientConfig wires retry + transport settings.
+type SlackGoClientConfig struct {
+	// APIURL overrides slack.com (testing).
+	APIURL string
+	// MaxRetries429 is the number of automatic in-client retries on 429.
+	// 0 disables (the caller handles 429s explicitly).
+	MaxRetries429 int
+	// RateLimitFallback is the wait when Slack omits Retry-After.
+	RateLimitFallback time.Duration
+	// MaxBackoff caps the in-client retry sleep.
+	MaxBackoff time.Duration
 }
 
 // NewSlackGoClient constructs a client. apiURL is optional — when non-empty
-// the client points there instead of slack.com, useful for httptest.
+// the client points there instead of slack.com, useful for httptest. This
+// signature is preserved for the existing callers; new code should use
+// NewSlackGoClientWithConfig.
 func NewSlackGoClient(token, apiURL string) *SlackGoClient {
+	return NewSlackGoClientWithConfig(token, SlackGoClientConfig{APIURL: apiURL})
+}
+
+// NewSlackGoClientWithConfig constructs a client with retry / rate-limit
+// behavior wired in. The client retries 429s up to cfg.MaxRetries429 times,
+// honoring Retry-After when present, falling back to cfg.RateLimitFallback
+// (capped by cfg.MaxBackoff) otherwise. On a 401 (token invalid), the
+// underlying call surfaces a SlackErrorResponse with code "invalid_auth";
+// callers should map that to ErrFatalAuth via IsFatalAuthError.
+func NewSlackGoClientWithConfig(token string, cfg SlackGoClientConfig) *SlackGoClient {
+	c := &SlackGoClient{}
 	var opts []sgs.Option
-	if apiURL != "" {
-		opts = append(opts, sgs.OptionAPIURL(apiURL))
+	if cfg.APIURL != "" {
+		opts = append(opts, sgs.OptionAPIURL(cfg.APIURL))
 	}
-	return &SlackGoClient{C: sgs.New(token, opts...)}
+	opts = append(opts, sgs.OptionOnResponseHeaders(func(_ string, headers http.Header) {
+		c.LastResponseHeaders = headers.Clone()
+	}))
+	if cfg.MaxRetries429 > 0 {
+		retryCfg := sgs.RetryConfig{
+			MaxRetries:         cfg.MaxRetries429,
+			RetryAfterDuration: cfg.RateLimitFallback,
+			BackoffInitial:     cfg.RateLimitFallback,
+			BackoffMax:         cfg.MaxBackoff,
+		}
+		opts = append(opts, sgs.OptionRetryConfig(retryCfg))
+	}
+	c.C = sgs.New(token, opts...)
+	return c
 }
 
 func (s *SlackGoClient) History(ctx context.Context, p HistoryParams) (HistoryPage, error) {
@@ -195,3 +240,75 @@ func isEmptyJSON(b []byte) bool {
 // ErrFatalAuth is returned by the client when Slack reports an
 // unrecoverable auth error. The poller should exit non-zero on this.
 var ErrFatalAuth = errors.New("slack auth error: token invalid or revoked")
+
+// fatalAuthCodes are Slack `error` codes that indicate the token cannot be
+// repaired by waiting/retrying — only by rotating credentials.
+var fatalAuthCodes = map[string]struct{}{
+	"invalid_auth":      {},
+	"not_authed":        {},
+	"token_revoked":     {},
+	"token_expired":     {},
+	"account_inactive":  {},
+	"missing_scope":     {},
+}
+
+// IsFatalAuthError reports whether err is a Slack auth failure that should
+// terminate the process (vs. backing off and retrying).
+func IsFatalAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrFatalAuth) {
+		return true
+	}
+	var sre sgs.SlackErrorResponse
+	if errors.As(err, &sre) {
+		if _, ok := fatalAuthCodes[sre.Err]; ok {
+			return true
+		}
+	}
+	// String fallback for the simpler errors slack-go surfaces.
+	msg := err.Error()
+	for code := range fatalAuthCodes {
+		if strings.Contains(msg, code) {
+			return true
+		}
+	}
+	return false
+}
+
+// rateLimitedRetryAfter pulls the wait duration off a *sgs.RateLimitedError
+// if err is one (or wraps one). Returns ok=false if not a rate-limit error.
+func rateLimitedRetryAfter(err error) (time.Duration, bool) {
+	if err == nil {
+		return 0, false
+	}
+	var rl *sgs.RateLimitedError
+	if errors.As(err, &rl) {
+		return rl.RetryAfter, true
+	}
+	return 0, false
+}
+
+// RateLimitWait reports the Retry-After-derived wait if err is a rate-limit
+// error. Exported for the daemon loop.
+func RateLimitWait(err error) (time.Duration, bool) {
+	return rateLimitedRetryAfter(err)
+}
+
+// channelAccessError returns the matching anomaly reason if err indicates
+// the bot cannot access the channel (channel_not_found, not_in_channel,
+// missing_scope), and "" otherwise.
+func channelAccessError(err error) string {
+	if err == nil {
+		return ""
+	}
+	codes := []string{"channel_not_found", "not_in_channel", "is_archived"}
+	msg := err.Error()
+	for _, c := range codes {
+		if strings.Contains(msg, c) {
+			return c
+		}
+	}
+	return ""
+}

@@ -3,6 +3,7 @@ package slack
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -19,6 +20,41 @@ type Poller struct {
 	Cursors *CursorStore
 	Writer  *Writer
 	Logger  *slog.Logger
+
+	// disabled holds channel IDs we have stopped polling for this process
+	// lifetime (e.g. channel_not_found). Per design/08 §"Error handling",
+	// such channels are skipped without mutating config.yaml.
+	disabledMu sync.RWMutex
+	disabled   map[string]struct{}
+
+	// OnlyTargets restricts a single PollOnce to a subset of channels and/or
+	// threads. Used by `slack-poller force-poll <id>`. Empty means
+	// "everything in scope". Reset between cycles by the caller.
+	OnlyTargets *PollTargets
+}
+
+// PollTargets restricts a single PollOnce to a subset of channels/threads.
+type PollTargets struct {
+	Channels map[string]struct{}
+	Threads  map[string]struct{}
+}
+
+// disabledHas reports whether a channel is in the disabled set.
+func (p *Poller) disabledHas(channel string) bool {
+	p.disabledMu.RLock()
+	defer p.disabledMu.RUnlock()
+	_, ok := p.disabled[channel]
+	return ok
+}
+
+// disable marks a channel as not-to-be-polled this process lifetime.
+func (p *Poller) disable(channel string) {
+	p.disabledMu.Lock()
+	defer p.disabledMu.Unlock()
+	if p.disabled == nil {
+		p.disabled = make(map[string]struct{})
+	}
+	p.disabled[channel] = struct{}{}
 }
 
 // PollResult summarizes one PollOnce call. Counters are aggregate across
@@ -29,13 +65,19 @@ type PollResult struct {
 	RawEventsWritten    int
 	InboxNewWritten     int
 	UpdatePingsWritten  int
+	AnomaliesWritten    int
 	Errors              int
 }
 
 // PollOnce runs one full poll cycle: every watched channel + every tracked
 // thread. Returns a result summary and an error only if the cycle could
-// not start (e.g., listing tracked threads failed). Per-target errors are
-// counted but do not abort the cycle.
+// not start (e.g., listing tracked threads failed) or if the context was
+// canceled. Per-target errors are counted but do not abort the cycle. If
+// p.OnlyTargets is non-nil, polling is restricted to the named channels
+// and threads (used by `force-poll`).
+//
+// Fatal auth errors are propagated as p's return value so the daemon can
+// exit immediately. Per design/08 §"Error handling".
 func (p *Poller) PollOnce(ctx context.Context) (PollResult, error) {
 	result := PollResult{}
 	logger := p.logger()
@@ -44,15 +86,31 @@ func (p *Poller) PollOnce(ctx context.Context) (PollResult, error) {
 	// within each. Channel volume is bounded by the watch list so the
 	// extra parallelism is not worth the complexity.
 	for _, ch := range p.Cfg.Watch.Channels {
-		select {
-		case <-ctx.Done():
-			return result, ctx.Err()
-		default:
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		if p.disabledHas(ch.ID) {
+			continue
+		}
+		if p.OnlyTargets != nil && !p.OnlyTargets.includesChannel(ch.ID) {
+			continue
 		}
 		r, err := p.pollChannel(ctx, ch.ID)
 		mergeResult(&result, r)
 		result.ChannelsPolled++
 		if err != nil {
+			if IsFatalAuthError(err) {
+				return result, fmt.Errorf("channel %s: %w", ch.ID, ErrFatalAuth)
+			}
+			if reason := channelAccessError(err); reason != "" {
+				p.handleChannelAccessError(&result, ch.ID, reason)
+				continue
+			}
+			// Rate-limit errors propagate so the daemon can back off
+			// rather than spin. Per design/08 §"Error handling".
+			if _, ok := RateLimitWait(err); ok {
+				return result, err
+			}
 			result.Errors++
 			logger.Error("channel poll failed",
 				slog.String("channel", ch.ID),
@@ -66,6 +124,17 @@ func (p *Poller) PollOnce(ctx context.Context) (PollResult, error) {
 		return result, fmt.Errorf("list tracked threads: %w", err)
 	}
 
+	// Apply OnlyTargets filter to threads if present.
+	if p.OnlyTargets != nil {
+		filtered := threadIDs[:0]
+		for _, id := range threadIDs {
+			if p.OnlyTargets.includesThread(id) {
+				filtered = append(filtered, id)
+			}
+		}
+		threadIDs = filtered
+	}
+
 	if len(threadIDs) == 0 {
 		return result, nil
 	}
@@ -77,12 +146,11 @@ func (p *Poller) PollOnce(ctx context.Context) (PollResult, error) {
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
+	var fatalErr error
 
 	for _, id := range threadIDs {
-		select {
-		case <-ctx.Done():
+		if err := ctx.Err(); err != nil {
 			break
-		default:
 		}
 		id := id
 		wg.Add(1)
@@ -96,6 +164,22 @@ func (p *Poller) PollOnce(ctx context.Context) (PollResult, error) {
 			mergeResult(&result, r)
 			result.ThreadsPolled++
 			if err != nil {
+				if IsFatalAuthError(err) && fatalErr == nil {
+					fatalErr = fmt.Errorf("thread %s: %w", id, ErrFatalAuth)
+				}
+				if reason := channelAccessError(err); reason != "" {
+					p.handleThreadAccessError(&result, id, reason)
+					return
+				}
+				if _, ok := RateLimitWait(err); ok && fatalErr == nil {
+					// Propagate the first rate-limit error so the daemon
+					// can sleep and write the anomaly. Subsequent threads
+					// in this cycle will be skipped (next iteration of the
+					// loop), but in-flight goroutines already started will
+					// complete normally.
+					fatalErr = err
+					return
+				}
 				result.Errors++
 				logger.Error("thread poll failed",
 					slog.String("thread", id),
@@ -104,7 +188,102 @@ func (p *Poller) PollOnce(ctx context.Context) (PollResult, error) {
 		}()
 	}
 	wg.Wait()
+	if fatalErr != nil {
+		return result, fatalErr
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
 	return result, nil
+}
+
+// includesChannel reports whether the targets set includes channel.
+func (t *PollTargets) includesChannel(channel string) bool {
+	if t == nil {
+		return true
+	}
+	if len(t.Channels) == 0 && len(t.Threads) == 0 {
+		return true
+	}
+	_, ok := t.Channels[channel]
+	return ok
+}
+
+// includesThread reports whether the targets set includes threadID.
+func (t *PollTargets) includesThread(threadID string) bool {
+	if t == nil {
+		return true
+	}
+	if len(t.Channels) == 0 && len(t.Threads) == 0 {
+		return true
+	}
+	_, ok := t.Threads[threadID]
+	return ok
+}
+
+// handleChannelAccessError records an anomaly and removes the channel from
+// active polling for the rest of this process. Config is not mutated.
+func (p *Poller) handleChannelAccessError(result *PollResult, channel, reason string) {
+	a := AnomalyChannelAccess(channel, "slack reported: "+reason)
+	wrote, err := p.Writer.WriteAnomaly(a)
+	if err != nil {
+		p.logger().Error("write channel-access anomaly",
+			slog.String("channel", channel),
+			slog.String("err", err.Error()))
+		result.Errors++
+		return
+	}
+	if wrote {
+		result.AnomaliesWritten++
+	}
+	p.disable(channel)
+	p.logger().Warn("disabling channel for remainder of process",
+		slog.String("channel", channel),
+		slog.String("reason", reason))
+}
+
+// handleThreadAccessError records an anomaly for a 404 / not_in_channel on
+// a tracked thread. We do not remove tracked-thread dirs (commander's job)
+// — we just stop returning errors for this thread by writing the anomaly
+// marker; future polls will simply repeat the API attempt.
+func (p *Poller) handleThreadAccessError(result *PollResult, threadID, reason string) {
+	a := AnomalyThreadNotFound(threadID, "slack reported: "+reason)
+	wrote, err := p.Writer.WriteAnomaly(a)
+	if err != nil {
+		p.logger().Error("write thread-not-found anomaly",
+			slog.String("thread", threadID),
+			slog.String("err", err.Error()))
+		result.Errors++
+		return
+	}
+	if wrote {
+		result.AnomaliesWritten++
+	}
+	p.logger().Warn("thread access error logged",
+		slog.String("thread", threadID),
+		slog.String("reason", reason))
+}
+
+// WriteRateLimitAnomaly records that we gave up on persistent 429s. The
+// daemon loop calls this from outside PollOnce after exhausting backoff.
+func (p *Poller) WriteRateLimitAnomaly(scope string, retryAfter time.Duration) (PollResult, error) {
+	result := PollResult{}
+	reason := fmt.Sprintf("persistent 429 after %s; retry-after=%s",
+		p.Cfg.Backoff.MaxBackoff.Duration, retryAfter)
+	a := AnomalyRateLimitExhausted(scope, reason)
+	wrote, err := p.Writer.WriteAnomaly(a)
+	if err != nil {
+		return result, err
+	}
+	if wrote {
+		result.AnomaliesWritten++
+	}
+	return result, nil
+}
+
+// IsContextErr reports whether err is a context cancellation/deadline.
+func IsContextErr(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // pollChannel runs the conversations.history loop for one channel and
@@ -439,6 +618,7 @@ func mergeResult(dst *PollResult, src PollResult) {
 	dst.RawEventsWritten += src.RawEventsWritten
 	dst.InboxNewWritten += src.InboxNewWritten
 	dst.UpdatePingsWritten += src.UpdatePingsWritten
+	dst.AnomaliesWritten += src.AnomaliesWritten
 	// ChannelsPolled, ThreadsPolled, Errors maintained by caller.
 }
 

@@ -70,7 +70,7 @@ poll_interval: 5s
 	}
 
 	run := exec.CommandContext(context.Background(), binPath,
-		"--state", stateRoot, "--once", "--api-url", m.URL(),
+		"--state-dir", stateRoot, "--once", "--api-url", m.URL(),
 		"--log-level", "debug")
 	run.Env = append(os.Environ(), "TEST_SLACK_TOKEN=xoxb-fake-token")
 	out2, err := run.CombinedOutput()
