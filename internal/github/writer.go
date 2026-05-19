@@ -60,7 +60,26 @@ type RawEvent struct {
 	UpdatedAt time.Time `json:"updated_at,omitempty"`
 	Body      string    `json:"body,omitempty"`
 	HTMLURL   string    `json:"html_url,omitempty"`
-	Raw       any       `json:"raw"`
+	// Snapshot is populated for kind=pr-state events per design/09
+	// §"State change detection".  Captures the explicit subset of fields
+	// the design requires so the rollup updater doesn't have to introspect
+	// the full PullRequest payload.
+	Snapshot *PRStateSnapshot `json:"snapshot,omitempty"`
+	Raw      any              `json:"raw"`
+}
+
+// PRStateSnapshot is the explicit "delta of interest" written into
+// pr-state-<updated_at>.json events.  Field set per design/09 §"State
+// change detection".
+type PRStateSnapshot struct {
+	State              string   `json:"state"`
+	Merged             bool     `json:"merged"`
+	Mergeable          *bool    `json:"mergeable"`
+	Labels             []string `json:"labels"`
+	HeadSHA            string   `json:"head_sha"`
+	BaseSHA            string   `json:"base_sha"`
+	RequestedReviewers []string `json:"requested_reviewers"`
+	Draft              bool     `json:"draft"`
 }
 
 // Meta is the schema in design/02 §threads/<id>/meta.json restricted to the
@@ -357,6 +376,55 @@ func (w *Writer) WriteInboxUpdate(id string, latestEventID, summary, rawRelPath 
 // there in MVP unless we hit a 404 on a tracked PR (handled in the orchestrator).
 func (w *Writer) AnomaliesDir() string {
 	return filepath.Join(w.StateRoot, "inbox", "anomalies")
+}
+
+// ArchiveThread moves state/threads/<id>/ to state/threads/_archive/<id>-<ts>/.
+// Used by the 404 handler and by `github-poller untrack-pr --archive`.
+// Idempotent: if the source thread is missing, returns ("", nil).
+func (w *Writer) ArchiveThread(id string) (string, error) {
+	src := w.threadDir(id)
+	if _, err := os.Stat(src); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
+		return "", err
+	}
+	dstDir := filepath.Join(w.StateRoot, "threads", "_archive")
+	if err := os.MkdirAll(dstDir, 0o755); err != nil {
+		return "", fmt.Errorf("mkdir %s: %w", dstDir, err)
+	}
+	stamp := time.Now().UTC().Format("20060102T150405Z")
+	dst := filepath.Join(dstDir, fmt.Sprintf("%s-%s", id, stamp))
+	if err := os.Rename(src, dst); err != nil {
+		return "", fmt.Errorf("rename %s -> %s: %w", src, dst, err)
+	}
+	return dst, nil
+}
+
+// AnomalyName returns a stable filename for an anomaly keyed on `id`.
+// Unlike WriteAnomaly's nanosecond suffix this allows callers to write
+// idempotent anomalies (one per logical event).
+func (w *Writer) WriteAnomalyStable(id, kind string, payload any) (string, error) {
+	if err := os.MkdirAll(w.AnomaliesDir(), 0o755); err != nil {
+		return "", err
+	}
+	path := filepath.Join(w.AnomaliesDir(), fmt.Sprintf("github-%s-%s.json", id, kind))
+	if _, err := os.Stat(path); err == nil {
+		// Already recorded; don't churn.
+		return path, nil
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 // WriteAnomaly writes a freeform JSON anomaly note for human review.

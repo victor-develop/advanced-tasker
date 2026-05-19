@@ -1,0 +1,46 @@
+[
+  {
+    "path": "config.yaml",
+    "hash": "175291c44d288353d71d3cd62b031cabf773bf623be492c55a1928a7dda1ed30"
+  },
+  {
+    "path": "inbox/new/github-acme-api-pr-1284.json",
+    "hash": "310bad0978f0977d30b3d79b03a491812be51db8fb6daabdb4944d6751275b88"
+  },
+  {
+    "path": "inbox/updates/github-acme-api-pr-1284-review-77001.json",
+    "hash": "f6a6325dbd570811d09a8ba5e68fdde3e75b11c06134b4f601055c15d9c7d17d"
+  },
+  {
+    "path": "sources/github/cursors/prs/acme-api-1284.json",
+    "hash": "\u003cpresent\u003e"
+  },
+  {
+    "path": "sources/github/cursors/repos/acme-api.json",
+    "hash": "\u003cpresent\u003e"
+  },
+  {
+    "path": "threads/github-acme-api-pr-1284/.dirty",
+    "hash": "\u003cdirty-marker\u003e"
+  },
+  {
+    "path": "threads/github-acme-api-pr-1284/meta.json",
+    "hash": "ad4e15c6c240b5266c11f271137c024644f6e80de42481699bb804cbe6323c0d"
+  },
+  {
+    "path": "threads/github-acme-api-pr-1284/raw/issue-comment-99001.json",
+    "hash": "6978d3b8bf97f858c0bd308391a3b1b44c762a11da173771379b5e16d0067cef"
+  },
+  {
+    "path": "threads/github-acme-api-pr-1284/raw/pr-state-2026-05-19T09-30-00Z.json",
+    "hash": "8fab241936d54c8b2dc416175ec20abfd820984c073172c2b09bb0492d132169"
+  },
+  {
+    "path": "threads/github-acme-api-pr-1284/raw/review-77001.json",
+    "hash": "22029cd5173ec3877a0e4deadccb5c48dff3c1b3c1bedfccea9e9f3f184b95be"
+  },
+  {
+    "path": "threads/github-acme-api-pr-1284/raw/review-comment-88001.json",
+    "hash": "80c65dadf7a9d2a687785e714432b4e9676906bcc7e168b6bc20452e83cfa800"
+  }
+]

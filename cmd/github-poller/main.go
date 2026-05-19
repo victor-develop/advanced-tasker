@@ -3,159 +3,77 @@
 // It polls GitHub for tracked PRs and discovers new PRs, persisting raw
 // events to state/threads/github-*/raw/<event-id>.json and touching the
 // .dirty marker after each cycle.  See design/09-github-poller.md for the
-// full spec.
+// full spec, including the C6 tracking lifecycle subcommands implemented
+// here (`watch`, `unwatch`, `track-pr`, `untrack-pr`, `status`,
+// `force-poll`).
 package main
 
 import (
-	"context"
-	"flag"
+	"errors"
 	"fmt"
-	"log/slog"
 	"os"
-	"os/signal"
-	"syscall"
-	"time"
+	"strings"
+
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	ghp "github.com/victor-develop/advanced-tasker/internal/github"
+	cli "github.com/victor-develop/advanced-tasker/internal/github/cli"
 )
 
 func main() {
-	var (
-		stateRoot  = flag.String("state-root", "state", "path to state/ directory")
-		configPath = flag.String("config", "", "path to sources/github/config.yaml (default: <state-root>/sources/github/config.yaml)")
-		once       = flag.Bool("once", false, "run a single poll cycle and exit")
-		logLevel   = flag.String("log-level", "info", "log level: debug|info|warn|error")
-		baseURL    = flag.String("github-base-url", "", "override GitHub API base URL (for tests / GHE)")
-	)
-	flag.Parse()
+	root := &cobra.Command{
+		Use:   "github-poller",
+		Short: "Track C: GitHub PR ingestion daemon and lifecycle CLI",
+		Long: `github-poller polls GitHub for tracked PRs and writes raw events
+under state/threads/github-*/.  See design/09-github-poller.md.
 
-	level := parseLevel(*logLevel)
-	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
-	slog.SetDefault(logger)
-
-	cfgPath := *configPath
-	if cfgPath == "" {
-		cfgPath = ghp.DefaultConfigPath(*stateRoot)
-	}
-	cfg, err := ghp.LoadConfig(cfgPath)
-	if err != nil {
-		logger.Error("load config", "path", cfgPath, "error", err)
-		os.Exit(2)
+Lifecycle subcommands (C6):
+  watch       Add a repo to state/sources/github/config.yaml watch.repos
+  unwatch     Remove a repo and clear its cursors
+  track-pr    Promote an inbox/new PR to a tracked PR
+  untrack-pr  Stop polling a PR (optionally archive the thread)
+  status      Show tracked repos + PRs + cursors
+  force-poll  Run one cycle immediately for the named scope
+`,
+		SilenceUsage:  true,
+		SilenceErrors: true,
 	}
 
-	token := cfg.Token()
-	if token == "" {
-		logger.Warn("GitHub token env is empty; running unauthenticated (rate limits will hurt)",
-			"env", cfg.Auth.TokenEnv)
-	}
-	client, err := ghp.NewClient(token, *baseURL, nil)
-	if err != nil {
-		logger.Error("build github client", "error", err)
-		os.Exit(2)
-	}
-
-	poller := &ghp.Poller{
-		Config:  cfg,
-		Client:  client,
-		Cursors: ghp.NewCursorStore(*stateRoot),
-		Writer:  ghp.NewWriter(*stateRoot),
-		Logger:  logger,
-	}
-
-	ctx, cancel := signal.NotifyContext(context.Background(),
-		syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-
-	if *once {
-		stats, err := poller.RunOnce(ctx)
-		if err != nil {
-			logger.Error("cycle failed", "error", err)
-			os.Exit(1)
+	var stateRoot string
+	root.PersistentFlags().StringVar(&stateRoot, "state-root", "state",
+		"path to state/ directory (alias: --state-dir for harness CLI consistency)")
+	// Accept --state-dir as an alias.  See design/03 §"Global flags".
+	root.PersistentFlags().SetNormalizeFunc(func(_ *pflag.FlagSet, name string) pflag.NormalizedName {
+		if strings.EqualFold(name, "state-dir") {
+			return pflag.NormalizedName("state-root")
 		}
-		logger.Info("cycle complete",
-			"repos", stats.ReposPolled,
-			"new_prs", stats.PRsDiscovered,
-			"prs_polled", stats.PRsPolled,
-			"raw_events", stats.RawEventsWritten,
-			"not_modified", stats.NotModifiedCount,
-			"anomalies", stats.AnomaliesRecorded,
-			"errors", stats.Errors,
-		)
-		return
-	}
+		return pflag.NormalizedName(name)
+	})
 
-	if err := runDaemon(ctx, logger, cfg, poller); err != nil {
-		logger.Error("daemon exited", "error", err)
-		os.Exit(1)
-	}
-}
+	runCmd := cli.NewRunCmd(&stateRoot)
+	root.AddCommand(runCmd)
+	root.AddCommand(cli.NewWatchCmd(&stateRoot))
+	root.AddCommand(cli.NewUnwatchCmd(&stateRoot))
+	root.AddCommand(cli.NewTrackPRCmd(&stateRoot))
+	root.AddCommand(cli.NewUntrackPRCmd(&stateRoot))
+	root.AddCommand(cli.NewStatusCmd(&stateRoot))
+	root.AddCommand(cli.NewForcePollCmd(&stateRoot))
 
-func runDaemon(ctx context.Context, logger *slog.Logger, cfg *ghp.Config, poller *ghp.Poller) error {
-	tick := time.NewTicker(cfg.PollInterval.Duration)
-	defer tick.Stop()
+	// Round-1 binary supported flags directly without a subcommand
+	// (e.g. `github-poller --once`).  Preserve that by inheriting the
+	// `run` subcommand's flags on the root, and dispatching to its
+	// RunE when called with no positional subcommand.  See scripts/smoke.sh.
+	root.Flags().AddFlagSet(runCmd.Flags())
+	root.RunE = runCmd.RunE
 
-	logger.Info("github-poller started",
-		"poll_interval", cfg.PollInterval.Duration.String(),
-		"repos", cfg.Watch.Repos,
-		"max_concurrent_pr_polls", cfg.MaxConcurrent,
-	)
-
-	// Run an initial cycle immediately so startup time isn't wasted.
-	if err := runCycleWithBackoff(ctx, logger, cfg, poller); err != nil {
-		return err
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			logger.Info("shutdown signal received; exiting cleanly")
-			return nil
-		case <-tick.C:
-			if err := runCycleWithBackoff(ctx, logger, cfg, poller); err != nil {
-				return err
-			}
+	if err := root.Execute(); err != nil {
+		// ErrConfigMissing was already printed verbatim by the run /
+		// force-poll handlers; don't double-print.  See the round-2
+		// agent brief: "exit 1 with the literal message".
+		if !errors.Is(err, ghp.ErrConfigMissing) {
+			fmt.Fprintln(os.Stderr, "error:", err)
 		}
+		os.Exit(cli.ExitCodeFor(err))
 	}
-}
-
-func runCycleWithBackoff(ctx context.Context, logger *slog.Logger, cfg *ghp.Config, poller *ghp.Poller) error {
-	stats, err := poller.RunOnce(ctx)
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil
-		}
-		logger.Error("cycle errored; sleeping before next attempt",
-			"backoff", cfg.Backoff.OnError.Duration.String(),
-			"error", err)
-		select {
-		case <-time.After(cfg.Backoff.OnError.Duration):
-		case <-ctx.Done():
-			return nil
-		}
-		return nil
-	}
-	logger.Info("cycle complete",
-		"repos", stats.ReposPolled,
-		"new_prs", stats.PRsDiscovered,
-		"prs_polled", stats.PRsPolled,
-		"raw_events", stats.RawEventsWritten,
-		"not_modified", stats.NotModifiedCount,
-		"anomalies", stats.AnomaliesRecorded,
-		"errors", stats.Errors,
-	)
-	return nil
-}
-
-func parseLevel(s string) slog.Level {
-	switch s {
-	case "debug":
-		return slog.LevelDebug
-	case "info":
-		return slog.LevelInfo
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	}
-	fmt.Fprintf(os.Stderr, "unknown log level %q; defaulting to info\n", s)
-	return slog.LevelInfo
 }

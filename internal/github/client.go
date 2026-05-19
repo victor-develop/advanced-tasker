@@ -291,11 +291,37 @@ func IsRateLimit(err error) (bool, time.Duration) {
 	return false, 0
 }
 
+// RateLimitReset extracts the absolute reset time (UTC) from a rate-limit
+// error, when present.  Used by the poller to compute an exact sleep
+// duration rather than a best-effort delta.  Returns the zero time when
+// not available.
+func RateLimitReset(err error) time.Time {
+	var rle *gh.RateLimitError
+	if errors.As(err, &rle) && !rle.Rate.Reset.IsZero() {
+		return rle.Rate.Reset.Time
+	}
+	return time.Time{}
+}
+
 // IsUnauthorized reports a 401.
 func IsUnauthorized(err error) bool {
 	var er *gh.ErrorResponse
 	if errors.As(err, &er) && er.Response != nil && er.Response.StatusCode == http.StatusUnauthorized {
 		return true
+	}
+	return false
+}
+
+// IsMalformed reports a 422 / 400 (GitHub's "malformed" responses).
+// Per design/09 §Error handling these are skipped for the cycle with an
+// anomaly logged.
+func IsMalformed(err error) bool {
+	var er *gh.ErrorResponse
+	if errors.As(err, &er) && er.Response != nil {
+		code := er.Response.StatusCode
+		if code == http.StatusUnprocessableEntity || code == http.StatusBadRequest {
+			return true
+		}
 	}
 	return false
 }

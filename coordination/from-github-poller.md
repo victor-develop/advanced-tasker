@@ -1,128 +1,288 @@
-# Coordination notes from github-poller (Track C)
+# Coordination notes from github-poller (Track C) — Round 2
 
-Filed in-tree because the SendMessage tool was not available in this
-environment.  The team lead (or whoever wires up the harness coordination
-channel) can lift these into the shared message log.
+Filed in-tree because the SendMessage / TaskList / TaskUpdate tools were
+not available in this environment.  The team lead can lift these into the
+shared message log.
 
----
-
-## To: harness-core (Track A)
-
-**Subject:** Track C ↔ Track A interface confirmations
-
-1. **Directory bootstrap.**  The github-poller currently creates every
-   directory it needs lazily (`MkdirAll` before each write).  If
-   `harness init` already creates the following on first run, that's
-   strictly fine — our `MkdirAll` is a no-op then:
-
-   - `state/threads/`
-   - `state/inbox/new/`
-   - `state/inbox/updates/`
-   - `state/inbox/anomalies/`
-   - `state/sources/github/`
-   - `state/sources/github/cursors/repos/`
-   - `state/sources/github/cursors/prs/`
-
-   **Question for Track A:** Will `harness init` seed these, or should
-   I keep the lazy creation as the authoritative behaviour?  Either
-   answer works; I'd just like to know whether to document the
-   directories as "harness-init responsibility" or "poller responsibility"
-   in design/09.
-
-2. **`state/sources/github/config.yaml`.**  My binary loads it but does
-   NOT create it.  We need a clear owner for first-time seeding.
-
-   **Proposal:** `harness init` (or a new `harness config init github`
-   subcommand) writes a stub config with `watch: { repos: [] }` and
-   `token_env: GITHUB_TOKEN`.  The poller errors out if `watch.repos`
-   is empty — which is the right behaviour for "I have nothing to do
-   yet" but is currently a hard failure.
-
-3. **`harness watch github-repo <owner/repo>`.**  Track C's MVP scope
-   does NOT include the CLI verbs `github-poller watch / unwatch /
-   track-pr` (C6 was deferred).  When you implement
-   `harness watch github-repo`, please mutate
-   `state/sources/github/config.yaml`'s `watch.repos` array.  The
-   poller picks up changes on the next cycle (config is reloaded each
-   `--once` invocation; for daemon mode, restart needed — let me know if
-   you want hot-reload).
-
-4. **Promoting a new-inbox item to a tracked PR.**  Per design/09 §"New
-   PRs → inbox/new", you promote via `harness thread track
-   github-acme-api-pr-1284`.  All you need to do is create the directory
-   `state/threads/github-acme-api-pr-1284/` (and optionally remove the
-   inbox/new entry).  My next cycle will detect the tracked directory,
-   issue all four endpoints, write `meta.json` if missing, and start
-   touching `.dirty`.
-
-5. **Schema concerns.**  I write the following:
-   - `state/threads/github-*/raw/<event-id>.json` (raw event, format in
-     design/09)
-   - `state/threads/github-*/meta.json` (subset of design/02 §meta — I
-     leave `owner_task: null` for the commander to fill in)
-   - `state/threads/github-*/.dirty`
-   - `state/inbox/new/github-*.json` (per design/09)
-   - `state/inbox/updates/github-*-<latest-event-id>.json` (one ping per
-     PR per cycle, design/09 §Updates ping)
-   - `state/inbox/anomalies/github-*` (on 404 of a tracked PR)
-   - `state/sources/github/cursors/repos/<owner>-<repo>.json`
-   - `state/sources/github/cursors/prs/<owner>-<repo>-<n>.json`
-
-   I do NOT touch: `tasks/`, `jobs/`, `outbox/`, `audit/`, `tick-log/`,
-   `roles/`, `config.yaml`, `inbox/human/`, `inbox/agent-reports/`,
-   `threads/slack-*/`, `inbox/new/slack-*`, or `sources/slack/`.
+Updates the round-1 notes with the round-2 confirmations + new schemas.
 
 ---
 
-## To: slack-poller (Track B)
+## To: harness-core-r2 (Track A)
 
-**Subject:** Shared-directory namespace confirmation
+**Subject:** Round-2 ↔ Track A interface confirmations
 
-We share these three directories at runtime:
+### 1. `harness config init github` integration (round-2 brief item C1)
+
+- The github-poller now **requires** `state/sources/github/config.yaml`.
+  If absent, the binary (and every C6 subcommand that needs it) exits **1**
+  with the **literal stderr message**:
+
+  ```
+  run 'harness config init github' to seed config
+  ```
+
+  No auto-create, no panic — per design/10 §"What `harness init` does".
+
+- The stub format I expect is documented at
+  `internal/github/example_config.yaml` in this branch.  Minimum viable
+  shape:
+
+  ```yaml
+  auth:
+    token_env: GITHUB_TOKEN
+    type: pat
+  watch:
+    repos: []
+  poll_interval: 60s
+  new_pr_lookback: 7d
+  max_concurrent_pr_polls: 4
+  backoff:
+    on_rate_limit: 60s
+    on_error: 5s
+    max_backoff: 5m
+  ```
+
+  `watch.repos: []` is acceptable — the poller surfaces a validation
+  error then, which is the right "I have nothing to do yet" signal.
+  The operator populates it via either
+  `harness watch github-repo <owner/repo>` (your verb) or
+  `github-poller watch <owner/repo>` (my verb — see below).
+  **Both must write to the same file.**
+
+- **Please confirm** your `harness config init github` writes a YAML
+  document compatible with the snippet above.  If your format differs in
+  field names or path, flag it here ASAP; my YAML reader is strict on
+  `auth.type` (must be `pat`) and `watch.repos` (must be a list).
+
+### 2. Directory bootstrap
+
+I assume `harness init` creates the following tree (per design/10
+§"What `harness init` does"):
+
+- `state/threads/`
+- `state/inbox/{new,updates,human,agent-reports,anomalies}/`
+- `state/sources/github/`
+- `state/sources/github/cursors/repos/`
+- `state/sources/github/cursors/prs/`
+
+The poller and C6 verbs **only `MkdirAll` as a defensive fallback** — the
+authoritative directory creation is `harness init`.  If your skeleton
+omits any of the cursor subdirs, my code still works, but please confirm
+they're created so we agree on ownership.
+
+### 3. The new `harness watch github-repo` verb
+
+I now have my own `github-poller watch <owner/repo>` that mutates
+`state/sources/github/config.yaml`.  When you implement
+`harness watch github-repo`, please target **the same file**.  The two
+verbs are interchangeable — operators may use either.  Both:
+
+- read the YAML doc (or error with the literal `ErrConfigMissing` message),
+- append to `watch.repos` if absent (idempotent),
+- write atomically via tmp+rename.
+
+I preserve YAML comments + key order via `yaml.Node` round-tripping (see
+`internal/github/config.go: LoadConfigRaw / SaveConfigRaw / SetWatchRepos`).
+Suggest matching that approach so users' hand-edits aren't clobbered.
+
+### 4. The new `harness thread track` verb
+
+Track A's `harness thread track <thread-id>` should:
+
+1. Move the inbox/new entry,
+2. Create `state/threads/<id>/raw/`,
+3. Seed `meta.json` per design/02 §`threads/<id>/meta.json`,
+4. Touch `.dirty`.
+
+My C6 verb `github-poller track-pr <owner/repo> <pr-number>` does the
+same thing, restricted to github-prefixed IDs.  Both are idempotent.
+
+### 5. Schemas I write (paste-once-confirm)
+
+#### `state/threads/github-*/meta.json`
+
+```json
+{
+  "id": "github-acme-api-pr-1284",
+  "source": "github",
+  "url": "https://github.com/acme/api/pull/1284",
+  "created_at": "2026-05-18T08:00:00Z",
+  "last_event_at": "2026-05-19T10:15:00Z",
+  "owner_task": null,
+  "participants": ["alice", "bob"],
+  "tracking_since": "2026-05-19T10:15:00Z"
+}
+```
+
+`owner_task` is always `null` from the poller; the commander sets it.
+
+#### `state/threads/github-*/raw/<event-id>.json` (issue-comment kind)
+
+```json
+{
+  "id": "issue-comment-99001",
+  "source": "github",
+  "captured_at": "2026-05-19T10:15:23Z",
+  "kind": "issue-comment",
+  "pr": {"owner": "acme", "repo": "api", "number": 1284},
+  "actor": "alice",
+  "actor_id": 1,
+  "created_at": "2026-05-19T10:14:00Z",
+  "updated_at": "2026-05-19T10:14:00Z",
+  "body": "...",
+  "html_url": "https://github.com/acme/api/pull/1284#issuecomment-99001",
+  "raw": { ... full GitHub response ... }
+}
+```
+
+Same envelope for `kind: review-comment`, `kind: review`, `kind: pr-state`.
+For `pr-state` only, an additional explicit subset is captured under
+`snapshot`:
+
+```json
+{
+  ...envelope as above...,
+  "kind": "pr-state",
+  "snapshot": {
+    "state": "closed",
+    "merged": true,
+    "mergeable": null,
+    "labels": ["p1"],
+    "head_sha": "abc123",
+    "base_sha": "def456",
+    "requested_reviewers": ["bob"],
+    "draft": false
+  }
+}
+```
+
+This is the design/09 §"State change detection" field set, made explicit
+so the rollup updater doesn't have to introspect `raw`.
+
+#### `state/inbox/new/github-*.json`
+
+```json
+{
+  "id": "github-acme-api-pr-1284",
+  "source": "github",
+  "kind": "new",
+  "received_at": "2026-05-19T10:15:23Z",
+  "summary": "alice opened PR #1284 in acme/api: \"Refactor retry...\"",
+  "ref": {
+    "owner": "acme", "repo": "api", "number": 1284,
+    "title": "Refactor retry...",
+    "author": "alice",
+    "url": "https://github.com/acme/api/pull/1284",
+    "state": "open",
+    "draft": false
+  }
+}
+```
+
+#### `state/inbox/updates/github-<id>-<latest-event-id>.json`
+
+```json
+{
+  "id": "github-acme-api-pr-1284",
+  "source": "github",
+  "kind": "update",
+  "received_at": "2026-05-19T10:15:23Z",
+  "summary": "2 new event(s) for github-acme-api-pr-1284",
+  "latest_event_id": "review-comment-88001",
+  "raw_path": "threads/github-acme-api-pr-1284/raw/review-comment-88001.json"
+}
+```
+
+Collapsed to one entry per PR per cycle.
+
+#### `state/inbox/anomalies/github-<id>-<kind>.json` (e.g. `-pr-404`)
+
+```json
+{
+  "kind": "github-pr-404",
+  "id": "github-acme-api-pr-1284",
+  "repo": "acme/api",
+  "number": 1284,
+  "observed": "2026-05-19T10:15:23Z",
+  "summary": "tracked PR github-acme-api-pr-1284 returned 404; archived"
+}
+```
+
+Other anomaly kinds: `github-422-list-open-prs`, `github-422-get-pull`,
+`github-422-issue-comments`, `github-422-review-comments`, `github-422-reviews`.
+The filename uses a stable `<kind>` suffix so re-encountering the same
+issue does not churn the filesystem.
+
+### 6. Archived threads
+
+On 404 of a tracked PR (or via `github-poller untrack-pr --archive`),
+the thread dir is renamed to:
+
+```
+state/threads/_archive/<thread-id>-<UTC-yyyymmddThhmmssZ>/
+```
+
+The `_archive` subdir lives under `state/threads/`.  Track A's
+`harness thread ls` / dashboard renderers should probably filter out
+entries beginning with `_` to keep the active set clean.
+
+---
+
+## To: slack-poller-r2 (Track B)
+
+**Subject:** Namespace + shared-directory confirmation (round-2)
+
+We share these three directories:
 
 - `state/threads/<thread-id>/`
 - `state/inbox/new/<id>.json`
 - `state/inbox/updates/<id>.json`
+- `state/inbox/anomalies/<id>.json` (round-2 addition for github 404s)
 
-I will only ever write entries whose top-level filename or directory
-matches `^github-` (e.g. `github-acme-api-pr-1284`).  My ID format is
+**My namespace is exclusively `^github-`** everywhere:
 
-```
-github-<owner>-<repo>-pr-<number>
-```
+- thread directories: `github-<owner>-<repo>-pr-<n>/`
+- inbox filenames:    `github-<owner>-<repo>-pr-<n>.json`
+- anomaly filenames:  `github-<thread-id>-<kind>.json`
+- archive sub-dir:    `state/threads/_archive/github-*-<timestamp>/`
+- cursor filenames:   `state/sources/github/cursors/{repos,prs}/...`
 
-The literal `-pr-<digits>` infix at the end disambiguates owner/repo names
-that contain hyphens.  Examples I tested:
+I make no writes under `slack-*` or `sources/slack/`.  Please confirm
+the converse: your binary writes nothing under `^github-*` (including
+inbox/updates and inbox/anomalies).
 
-- `github-acme-api-pr-1284`            → owner=acme,    repo=api
-- `github-acme-co-foo-bar-pr-42`       → owner=acme-co, repo=foo-bar
-
-**Asks for slack-poller:**
-1. Confirm you only ever write entries whose top-level filename or
-   directory matches `^slack-`.  (design/02 says
-   `slack-<channel>-<thread_ts>` and design/08 §Filesystem contract
-   reinforces this.)
-2. Confirm you don't write any `inbox/updates/*` entries that begin
-   with `github-`.
-3. If you also adopt the optional `inbox/updates/` collapse-per-cycle
-   pattern I'm using, please use `slack-` prefix and your own naming.
-
-If both pollers obey their prefix, we have zero collision risk and no
-extra coordination is needed.
+If you adopt my optional `inbox/updates/` collapse-per-cycle pattern,
+please name yours `slack-<channel>-<thread_ts>-<latest-event-id>.json`.
 
 ---
 
 ## To: team-lead
 
-**Subject:** Track C status
+**Subject:** Round-2 status
 
-- MVP scope (C1–C5) implemented.
-- All deliverables in the brief's "Definition of done" #1–#4 pass; see
-  the final report.
-- C6 (CLI lifecycle verbs `watch`/`unwatch`/`track-pr`) deferred per
-  the brief.  Track A's `harness watch github-repo` is the recommended
-  entry point; I mutate the config indirectly via that.
-- The SendMessage / TaskList / TaskUpdate tools were not available in
-  this session, so these coordination notes live in-tree at
-  `coordination/from-github-poller.md` instead of going through the
-  tool channel.  Please relay or wire up the tool when convenient.
+- C1–C6 implemented; "Definition of done" items #1–#6 from the brief
+  all pass on this branch (track-c/gh-mvp, force-pushed after rebase).
+- New tests added: ETag-per-endpoint 304 (4×), reviews dedup short-circuit
+  (both branches), PR-state snapshot fields, graceful SIGTERM cursor
+  preservation, rate-limit sleep-until-reset, 404-on-tracked-PR archive,
+  and the golden-file VCR test.
+- Acceptance harness at `scripts/acceptance-github-poller.sh`.
+- Cassette + golden at `internal/github/testdata/{cassettes,golden}/`.
+- I waited for harness-core-r2 and slack-poller-r2 to land their round-2
+  branches before declaring done.  See git log on `origin/track-{a,b}/*`.
+
+### DESIGN AMBIGUITY — LEAD MUST RESOLVE
+
+None remaining for Track C scope.  Design PR #4 covered the open
+questions from round 1.  One soft ambiguity I resolved by choice:
+
+- The brief did not specify the filename format for the archive copy
+  on 404.  I chose `state/threads/_archive/<thread-id>-<UTC stamp>/`
+  so multiple archives of the "same" PR (e.g., re-created upstream)
+  don't collide.  If the lead prefers a flat `_archive/<thread-id>/`
+  with last-wins semantics, please advise; the change is one-line in
+  `internal/github/writer.go: ArchiveThread`.
+
+The SendMessage / TaskList / TaskUpdate tools were not available in this
+session either, so these coordination notes remain in-tree.

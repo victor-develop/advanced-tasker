@@ -1,0 +1,299 @@
+---
+version: 2
+interactions:
+    - id: 0
+      request:
+        proto: HTTP/1.1
+        proto_major: 1
+        proto_minor: 1
+        content_length: 0
+        host: 127.0.0.1:54425
+        form:
+            direction:
+                - desc
+            page:
+                - "1"
+            per_page:
+                - "50"
+            sort:
+                - updated
+            state:
+                - open
+        headers:
+            Accept:
+                - application/vnd.github.v3+json
+            Authorization:
+                - Bearer test-token
+            User-Agent:
+                - go-github/v75.0.0
+            X-Github-Api-Version:
+                - "2022-11-28"
+        url: http://127.0.0.1:54425/repos/acme/api/pulls?direction=desc&page=1&per_page=50&sort=updated&state=open
+        method: GET
+      response:
+        proto: HTTP/1.1
+        proto_major: 1
+        proto_minor: 1
+        content_length: 312
+        body: |-
+            [
+              {
+                "id": 1000, "number": 1284, "state": "open", "draft": false,
+                "title": "Refactor retry to jittered exponential",
+                "html_url": "https://github.com/acme/api/pull/1284",
+                "created_at": "2026-05-18T08:00:00Z",
+                "updated_at": "2026-05-19T09:30:00Z",
+                "user": {"id": 1, "login": "alice"}
+              }
+            ]
+        headers:
+            Content-Length:
+                - "312"
+            Content-Type:
+                - application/json
+            Date:
+                - Tue, 19 May 2026 12:32:28 GMT
+            Etag:
+                - '"discovery-v1"'
+        status: 200 OK
+        code: 200
+        duration: 863.417µs
+    - id: 1
+      request:
+        proto: HTTP/1.1
+        proto_major: 1
+        proto_minor: 1
+        content_length: 0
+        host: 127.0.0.1:54425
+        form:
+            direction:
+                - desc
+            page:
+                - "1"
+            per_page:
+                - "50"
+            sort:
+                - updated
+            state:
+                - open
+        headers:
+            Accept:
+                - application/vnd.github.v3+json
+            Authorization:
+                - Bearer test-token
+            If-None-Match:
+                - '"discovery-v1"'
+            User-Agent:
+                - go-github/v75.0.0
+            X-Github-Api-Version:
+                - "2022-11-28"
+        url: http://127.0.0.1:54425/repos/acme/api/pulls?state=open&sort=updated&direction=desc&per_page=50&page=1
+        method: GET
+      response:
+        proto: HTTP/1.1
+        proto_major: 1
+        proto_minor: 1
+        content_length: 312
+        body: |-
+            [
+              {
+                "id": 1000, "number": 1284, "state": "open", "draft": false,
+                "title": "Refactor retry to jittered exponential",
+                "html_url": "https://github.com/acme/api/pull/1284",
+                "created_at": "2026-05-18T08:00:00Z",
+                "updated_at": "2026-05-19T09:30:00Z",
+                "user": {"id": 1, "login": "alice"}
+              }
+            ]
+        headers:
+            Content-Length:
+                - "312"
+            Content-Type:
+                - application/json
+            Date:
+                - Tue, 19 May 2026 12:32:28 GMT
+            Etag:
+                - '"discovery-v1"'
+        status: 200 OK
+        code: 200
+        duration: 227.875µs
+    - id: 2
+      request:
+        proto: HTTP/1.1
+        proto_major: 1
+        proto_minor: 1
+        content_length: 0
+        host: 127.0.0.1:54425
+        headers:
+            Accept:
+                - application/vnd.github.v3+json
+            Authorization:
+                - Bearer test-token
+            User-Agent:
+                - go-github/v75.0.0
+            X-Github-Api-Version:
+                - "2022-11-28"
+        url: http://127.0.0.1:54425/repos/acme/api/pulls/1284
+        method: GET
+      response:
+        proto: HTTP/1.1
+        proto_major: 1
+        proto_minor: 1
+        content_length: 450
+        body: |-
+            {
+              "id": 1000, "number": 1284, "state": "open", "merged": false,
+              "mergeable": true, "draft": false, "title": "Refactor retry",
+              "user": {"id": 1, "login": "alice"},
+              "html_url": "https://github.com/acme/api/pull/1284",
+              "created_at": "2026-05-18T08:00:00Z",
+              "updated_at": "2026-05-19T09:30:00Z",
+              "labels": [{"name": "p1"}],
+              "head": {"sha": "headsha1"},
+              "base": {"sha": "basesha1"},
+              "requested_reviewers": [{"id": 2, "login": "bob"}]
+            }
+        headers:
+            Content-Length:
+                - "450"
+            Content-Type:
+                - application/json
+            Date:
+                - Tue, 19 May 2026 12:32:28 GMT
+            Etag:
+                - '"pr-v1"'
+        status: 200 OK
+        code: 200
+        duration: 153.291µs
+    - id: 3
+      request:
+        proto: HTTP/1.1
+        proto_major: 1
+        proto_minor: 1
+        content_length: 0
+        host: 127.0.0.1:54425
+        form:
+            page:
+                - "1"
+            per_page:
+                - "50"
+        headers:
+            Accept:
+                - application/vnd.github.v3+json
+            Authorization:
+                - Bearer test-token
+            User-Agent:
+                - go-github/v75.0.0
+            X-Github-Api-Version:
+                - "2022-11-28"
+        url: http://127.0.0.1:54425/repos/acme/api/issues/1284/comments?per_page=50&page=1
+        method: GET
+      response:
+        proto: HTTP/1.1
+        proto_major: 1
+        proto_minor: 1
+        content_length: 226
+        body: |-
+            [
+              {"id": 99001, "user": {"id": 1, "login": "alice"}, "body": "looks good", "created_at": "2026-05-19T09:50:00Z", "updated_at": "2026-05-19T09:50:00Z", "html_url": "https://github.com/acme/api/pull/1284#issuecomment-99001"}
+            ]
+        headers:
+            Content-Length:
+                - "226"
+            Content-Type:
+                - application/json
+            Date:
+                - Tue, 19 May 2026 12:32:28 GMT
+            Etag:
+                - '"ic-v1"'
+        status: 200 OK
+        code: 200
+        duration: 292.209µs
+    - id: 4
+      request:
+        proto: HTTP/1.1
+        proto_major: 1
+        proto_minor: 1
+        content_length: 0
+        host: 127.0.0.1:54425
+        form:
+            page:
+                - "1"
+            per_page:
+                - "50"
+        headers:
+            Accept:
+                - application/vnd.github.v3+json
+            Authorization:
+                - Bearer test-token
+            User-Agent:
+                - go-github/v75.0.0
+            X-Github-Api-Version:
+                - "2022-11-28"
+        url: http://127.0.0.1:54425/repos/acme/api/pulls/1284/comments?per_page=50&page=1
+        method: GET
+      response:
+        proto: HTTP/1.1
+        proto_major: 1
+        proto_minor: 1
+        content_length: 233
+        body: |-
+            [
+              {"id": 88001, "user": {"id": 2, "login": "bob"}, "body": "small nit on line 42", "created_at": "2026-05-19T09:55:00Z", "updated_at": "2026-05-19T09:55:00Z", "html_url": "https://github.com/acme/api/pull/1284#discussion_r88001"}
+            ]
+        headers:
+            Content-Length:
+                - "233"
+            Content-Type:
+                - application/json
+            Date:
+                - Tue, 19 May 2026 12:32:28 GMT
+            Etag:
+                - '"rc-v1"'
+        status: 200 OK
+        code: 200
+        duration: 123.208µs
+    - id: 5
+      request:
+        proto: HTTP/1.1
+        proto_major: 1
+        proto_minor: 1
+        content_length: 0
+        host: 127.0.0.1:54425
+        form:
+            page:
+                - "1"
+            per_page:
+                - "50"
+        headers:
+            Accept:
+                - application/vnd.github.v3+json
+            Authorization:
+                - Bearer test-token
+            User-Agent:
+                - go-github/v75.0.0
+            X-Github-Api-Version:
+                - "2022-11-28"
+        url: http://127.0.0.1:54425/repos/acme/api/pulls/1284/reviews?per_page=50&page=1
+        method: GET
+      response:
+        proto: HTTP/1.1
+        proto_major: 1
+        proto_minor: 1
+        content_length: 213
+        body: |-
+            [
+              {"id": 77001, "user": {"id": 1, "login": "alice"}, "state": "APPROVED", "body": "ship it", "submitted_at": "2026-05-19T09:57:00Z", "html_url": "https://github.com/acme/api/pull/1284#pullrequestreview-77001"}
+            ]
+        headers:
+            Content-Length:
+                - "213"
+            Content-Type:
+                - application/json
+            Date:
+                - Tue, 19 May 2026 12:32:28 GMT
+            Etag:
+                - '"rv-v1"'
+        status: 200 OK
+        code: 200
+        duration: 104.375µs

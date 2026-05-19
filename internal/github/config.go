@@ -6,6 +6,7 @@
 package github
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,16 @@ import (
 
 	"gopkg.in/yaml.v3"
 )
+
+// ErrConfigMissing is returned by LoadConfig when the config file does not
+// exist on disk.  The cmd/github-poller main and the C6 lifecycle CLIs
+// surface this as the literal operator-facing message:
+//
+//	run 'harness config init github' to seed config
+//
+// See design/03 §"harness config init <source>" and design/10
+// §"What `harness init` does".
+var ErrConfigMissing = errors.New("run 'harness config init github' to seed config")
 
 // Config mirrors state/sources/github/config.yaml from design/09 §Configuration.
 type Config struct {
@@ -82,6 +93,9 @@ func ParseRepo(s string) (RepoRef, error) {
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, ErrConfigMissing
+		}
 		return nil, fmt.Errorf("read config %s: %w", path, err)
 	}
 	var c Config
@@ -153,4 +167,126 @@ func (c *Config) Token() string { return os.Getenv(c.Auth.TokenEnv) }
 // DefaultConfigPath returns the path to the config file under a state root.
 func DefaultConfigPath(stateRoot string) string {
 	return filepath.Join(stateRoot, "sources", "github", "config.yaml")
+}
+
+// LoadConfigRaw returns the raw YAML document and Config; used by the C6
+// lifecycle CLIs (watch/unwatch) which need to round-trip the file while
+// preserving any operator-added fields.  Unlike LoadConfig it does NOT
+// apply defaults or validate `watch.repos` non-empty — those are
+// invariants for the poller, not for the lifecycle CLIs.
+func LoadConfigRaw(path string) (*yaml.Node, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, ErrConfigMissing
+		}
+		return nil, fmt.Errorf("read config %s: %w", path, err)
+	}
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return nil, fmt.Errorf("parse config %s: %w", path, err)
+	}
+	return &root, nil
+}
+
+// SaveConfigRaw atomically writes a yaml.Node tree back to disk.
+func SaveConfigRaw(path string, root *yaml.Node) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
+	}
+	data, err := yaml.Marshal(root)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("rename %s -> %s: %w", tmp, path, err)
+	}
+	return nil
+}
+
+// WatchRepos returns the watch.repos list from the YAML tree, or nil if
+// absent.  Mutating the returned slice does not mutate the tree.
+func WatchRepos(root *yaml.Node) []string {
+	seq := findRepoSeq(root)
+	if seq == nil {
+		return nil
+	}
+	out := make([]string, 0, len(seq.Content))
+	for _, n := range seq.Content {
+		if n.Kind == yaml.ScalarNode {
+			out = append(out, n.Value)
+		}
+	}
+	return out
+}
+
+// SetWatchRepos replaces the watch.repos list in-place, creating the
+// `watch` mapping and `repos` sequence node if missing.
+func SetWatchRepos(root *yaml.Node, repos []string) {
+	if root == nil || len(root.Content) == 0 {
+		// Empty doc: build the minimal scaffold.
+		root.Kind = yaml.DocumentNode
+		root.Content = []*yaml.Node{{Kind: yaml.MappingNode}}
+	}
+	doc := root.Content[0]
+	watch := findOrCreateMapEntry(doc, "watch")
+	if watch.Kind == 0 {
+		watch.Kind = yaml.MappingNode
+	}
+	repoNode := findOrCreateMapEntry(watch, "repos")
+	repoNode.Kind = yaml.SequenceNode
+	repoNode.Tag = "!!seq"
+	repoNode.Content = repoNode.Content[:0]
+	for _, r := range repos {
+		repoNode.Content = append(repoNode.Content, &yaml.Node{
+			Kind:  yaml.ScalarNode,
+			Tag:   "!!str",
+			Value: r,
+		})
+	}
+}
+
+func findRepoSeq(root *yaml.Node) *yaml.Node {
+	if root == nil || len(root.Content) == 0 {
+		return nil
+	}
+	doc := root.Content[0]
+	if doc.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(doc.Content); i += 2 {
+		if doc.Content[i].Value == "watch" {
+			watch := doc.Content[i+1]
+			if watch.Kind != yaml.MappingNode {
+				return nil
+			}
+			for j := 0; j+1 < len(watch.Content); j += 2 {
+				if watch.Content[j].Value == "repos" && watch.Content[j+1].Kind == yaml.SequenceNode {
+					return watch.Content[j+1]
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// findOrCreateMapEntry locates the value node for `key` inside the given
+// mapping node, creating an empty mapping value if absent.
+func findOrCreateMapEntry(parent *yaml.Node, key string) *yaml.Node {
+	if parent.Kind != yaml.MappingNode {
+		parent.Kind = yaml.MappingNode
+	}
+	for i := 0; i+1 < len(parent.Content); i += 2 {
+		if parent.Content[i].Value == key {
+			return parent.Content[i+1]
+		}
+	}
+	k := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}
+	v := &yaml.Node{Kind: yaml.MappingNode}
+	parent.Content = append(parent.Content, k, v)
+	return v
 }

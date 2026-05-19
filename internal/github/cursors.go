@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -81,6 +82,72 @@ func (s *CursorStore) LoadPR(r RepoRef, number int) (*PRCursor, error) {
 // SavePR writes a PR cursor atomically.
 func (s *CursorStore) SavePR(r RepoRef, number int, c *PRCursor) error {
 	return writeJSON(s.prPath(r, number), c)
+}
+
+// DeletePR removes the cursor file for a PR (idempotent — missing file is
+// not an error).  Used by `untrack-pr` and by the 404-on-tracked-PR
+// archive flow.
+func (s *CursorStore) DeletePR(r RepoRef, number int) error {
+	path := s.prPath(r, number)
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove %s: %w", path, err)
+	}
+	return nil
+}
+
+// DeleteRepo removes the discovery cursor for a repo.  Also removes any
+// PR cursors that belong to that repo so the slate is fully clean.
+// Used by `unwatch`.
+func (s *CursorStore) DeleteRepo(r RepoRef) error {
+	if err := os.Remove(s.repoPath(r)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove %s: %w", s.repoPath(r), err)
+	}
+	prsDir := filepath.Join(s.Root, "prs")
+	entries, err := os.ReadDir(prsDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("readdir %s: %w", prsDir, err)
+	}
+	prefix := fmt.Sprintf("%s-%s-", r.Owner, r.Repo)
+	for _, e := range entries {
+		if !e.Type().IsRegular() {
+			continue
+		}
+		name := e.Name()
+		if !startsWith(name, prefix) {
+			continue
+		}
+		// Confirm the suffix after the prefix is purely digits + ".json".
+		if !looksLikePRCursor(name[len(prefix):]) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(prsDir, name)); err != nil {
+			return fmt.Errorf("remove %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func startsWith(s, prefix string) bool {
+	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
+}
+
+func looksLikePRCursor(tail string) bool {
+	if !strings.HasSuffix(tail, ".json") {
+		return false
+	}
+	num := strings.TrimSuffix(tail, ".json")
+	if num == "" {
+		return false
+	}
+	for _, c := range num {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // AddReviewSeen records that a review id was processed.  Returns true if added,
