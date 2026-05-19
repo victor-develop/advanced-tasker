@@ -4,20 +4,37 @@ The `harness` CLI is the only sanctioned mutator of `state/`. Every command
 that changes git-tracked state ends with a `git commit` inside `state/`.
 
 ## Global flags
-- `--state <path>` — override state directory (default: `$HARNESS_STATE` or
-  `./state`)
+- `--state-dir <path>` — override state directory (default: `$HARNESS_STATE` or
+  `./state`). **Note:** the global flag is `--state-dir` rather than `--state`
+  because several subcommands take a local `--state <enum>` argument (e.g.
+  `harness task update --state ready`), and a same-named global would be
+  shadowed by cobra's resolver.
 - `--json` — machine-readable output
 - `--dry-run` — print intended actions and git diff without applying
 
 ## Lifecycle
 
 ```
-harness init [--state <path>]
-  # Create state/ skeleton, git init inside it, write default config.yaml.
+harness init [--state-dir <path>]
+  # Create state/ skeleton, git init inside it, write default config.yaml,
+  # install post-commit hook for ledger/pin guards. Does NOT seed
+  # state/sources/<source>/config.yaml — use `harness config init <source>`
+  # for that, so each source can be opted-in deliberately.
 
 harness config get <key>
 harness config set <key> <value>
   # Reads/writes config.yaml. <key> uses dotted path (e.g. models.commander).
+
+harness config init <source>
+  # Seed state/sources/<source>/config.yaml with a documented stub.
+  # <source> ∈ { slack, github }. Idempotent (re-running on an existing
+  # config exits 0 with a notice and does not overwrite). Pollers MUST
+  # error with a clear "run `harness config init <source>` to seed
+  # config" message when the file is missing — never panic, never
+  # auto-create a non-functional default at poll time. The seeded config
+  # has `watch: []` (or `watch.channels: []` / `watch.repos: []`); the
+  # operator runs `harness watch slack-channel <id>` or
+  # `harness watch github-repo <owner/repo>` to populate it.
 
 harness version
 ```
@@ -131,9 +148,26 @@ harness outbox revoke O-<id>             # within revoke_window
 
 ```
 harness rollup show <thread-id>          # full rollup
-harness rollup flush <thread-id>         # force updater to re-summarize
+harness rollup flush <thread-id>         # force updater to re-summarize (touches .dirty)
 harness rollup edit <thread-id>          # opens $EDITOR; CLI re-validates
 harness rollup pin <thread-id> "<verbatim>"   # add a human-marked pin
+
+harness rollup update <thread-id> --file=<path>
+  # Atomic write of a full rollup file (the updater daemon's entry point).
+  # Runs the validation pipeline from design/05 §"Validation pipeline":
+  #   1. schema check → exit 2 + inbox/anomalies/ on fail
+  #   2. append-only ledger check against git HEAD → exit 2 on violation
+  #   3. human-pin preservation check → exit 2 on violation
+  #   4. write rollup.md, git add + commit, clear .dirty
+  #   5. emit state/inbox/updates/<thread-id>-<commit-sha>.json
+  # Pipe-friendly: `--file=-` reads stdin. The post-commit hook re-runs
+  # checks 2+3 against HEAD~1..HEAD as belt-and-suspenders.
+
+harness rollup render-input <thread-id>
+  # Pure function: emits the prompt described in design/05 §"Input the
+  # updater sees" (goal of owner_task + current rollup + new raw events).
+  # No LLM call, no mutation. The autopilot rollup-updater daemon uses
+  # this to assemble its LLM input.
 ```
 
 ## Tick and dashboard
