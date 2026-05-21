@@ -240,12 +240,32 @@ Dispatched J-abc123 to pr-reviewer to evaluate PR-1284 v2.
     "thread_ts": null,
     "user": "alice"
   },
-  "raw_path": "threads/slack-C0492-.../raw/1715814999.000400.json"
+  "raw_inline": {
+    "text": "hey, what's the status of the ingest pipeline?",
+    "permalink": "https://acme.slack.com/archives/C0492/p1715814999000400"
+  }
 }
 ```
 
 `kind` is one of `new`, `update`, `human-directive`, `agent-report`,
 `anomaly`.
+
+### Raw event location — inbox/new vs threads/
+
+The raw event payload for a signal lives in different places at different
+points in its lifecycle:
+
+| Stage | Where the raw payload lives | Reason |
+|---|---|---|
+| **New, untracked** (just landed in `inbox/new/`) | Inline under `raw_inline` in the inbox item itself | The poller has not yet promoted a thread directory — there's no `threads/<id>/` to write to. The commander triages the inbox item and sees enough content inline to decide whether to promote. |
+| **Tracked** (promoted via `harness thread track <id>`) | `state/threads/<id>/raw/<event-id>.json` | Standard per-thread layout. Promotion moves the `raw_inline` payload into `raw/<ts>.json` (Slack) or `raw/<event-id>.json` (GitHub) and deletes the inbox/new entry. |
+| **Update to tracked thread** | `state/threads/<id>/raw/<event-id>.json` plus an optional `inbox/updates/<id>-<latest-event-id>.json` ping | Polling daemon writes the raw event; the inbox/updates entry is a lightweight signal to the commander. |
+
+The `raw_path` field name was used in earlier drafts. Pollers and CLI
+consumers MUST use `raw_inline` for the new-untracked stage. See
+[design/08-slack-poller.md](./08-slack-poller.md) §"New (untracked) thread
+→ inbox/new" and [design/09-github-poller.md](./09-github-poller.md)
+§"New PRs → inbox/new" for per-source examples.
 
 ### Human directives (inbox/human/)
 
