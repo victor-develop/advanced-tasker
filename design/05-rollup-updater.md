@@ -74,6 +74,32 @@ or, the updater daemon pipes stdout directly to the CLI.
 
 When `harness rollup update` is called:
 
+### Step 0.5: Frontmatter ID matches thread directory
+
+Before any other validation, assert:
+
+```
+new_rollup.frontmatter["id"] == <thread directory name>
+```
+
+where the thread directory is `state/threads/<id>/` and `<id>` is the
+path segment containing the `rollup.md` being written. The check is a
+strict string equality — no trimming, no case folding.
+
+Rationale: this catches a class of bug where the LLM produces a rollup
+whose body looks valid but whose frontmatter `id` field points at a
+different thread. Without this guard, the updater silently writes a
+content-correct file under the wrong thread directory, and the
+inconsistency only surfaces later when something cross-references the
+two. The check is one line of Go in the validator and one line in the
+post-commit hook.
+
+On mismatch → reject with `exit code 2`, write to `inbox/anomalies/`
+with `reason: "frontmatter.id (<id-in-file>) does not match thread
+directory (<dir-name>)"`. No commit. The rollup-updater daemon must
+NOT retry on this rejection — a mismatched id is an LLM output bug, not
+a transient failure.
+
 ### Step 1: Schema check
 - Required YAML frontmatter fields present
 - `state` matches enum
@@ -114,9 +140,9 @@ If all checks pass:
   commander on next tick
 
 ### Step 5: Post-commit hook re-validates (belt + suspenders)
-A post-commit hook in `state/.git/hooks/post-commit` re-runs steps 2 and 3
-against `HEAD~1 vs HEAD`. If somehow a violation slipped through, the hook
-calls `git reset --hard HEAD~1` and writes to `inbox/anomalies/`.
+A post-commit hook in `state/.git/hooks/post-commit` re-runs steps 0.5, 2,
+and 3 against `HEAD~1 vs HEAD`. If somehow a violation slipped through, the
+hook calls `git reset --hard HEAD~1` and writes to `inbox/anomalies/`.
 
 ## Failure handling
 
