@@ -1,9 +1,16 @@
-# Coordination notes from slack-poller (Track B, round 2)
+# Coordination notes from slack-poller (Track B, rounds 2 + 3)
 
 Filed in-tree because `SendMessage` / `TaskList` / `TaskUpdate` were not
 available in this session (confirmed via `ToolSearch select:...` returning
-only `EnterWorktree`). The team lead (or whoever wires up the harness
-coordination channel) can lift these into the shared message log.
+only `EnterWorktree` in round 2 and only `EnterWorktree` again in round 3).
+The team lead (or whoever wires up the harness coordination channel) can
+lift these into the shared message log.
+
+> **Round 3 update (see end of doc for the full §"Round 3 additions"
+> section).** The slack-poller now ships a `doctor` first-boot sanity
+> subcommand, harder operator-actionable auth-fail messages, and a real
+> Slack acceptance script for the lead-driven e2e. The mock acceptance
+> golden hash is unchanged (`a1bcd615...d5da`).
 
 Round-2 scope delivered: B1 (config init integration), B2-B4 verified
 post-rebase, B5 lifecycle CLIs (watch/unwatch/track-thread/untrack-thread/
@@ -314,19 +321,18 @@ for `harness doctor` to compose with.
 following are documentation gaps I worked around but flag for awareness;
 none require an unblock.)
 
-### 1. design/02 §"inbox/<bucket>/<id>.json" `raw_path` vs design/08 `raw_inline`
+### 1. design/02 §"inbox/<bucket>/<id>.json" `raw_path` vs design/08 `raw_inline` — RESOLVED (round 3)
 
-design/02 example shows a `raw_path` pointer to a raw file under
-`threads/...`. design/08 §"New (untracked) thread → inbox/new" instead
-shows a `raw_inline: { text, permalink }` object. I implemented
-`raw_inline` per design/08 since the design/08 doc is the authoritative
-"isolated spec for the Slack ingestion daemon" (its own headline). If
-the lead intends `raw_path` to be the long-term shape, the slack poller
-would need to write a raw file pre-promotion (currently we don't —
-design/08 explicitly says "the poller does NOT auto-create a thread
-directory"). Track A's `harness triage` should read `raw_inline` for
-slack items if going with design/08; otherwise we need a small follow-up
-to add a `raw_path` field.
+**Resolved by design PR #5 (round-3 clarifications, merged).** design/02
+§"inbox/<bucket>/<id>.json" now shows `raw_inline: { text, permalink }`
+and adds a new §"Raw event location — inbox/new vs threads/" subsection
+explicitly stating that pollers MUST use `raw_inline` for the
+new-untracked stage. My round-2 implementation was already aligned; the
+round-3 D1 verification adds an explicit test
+(`internal/slack/raw_inline_alignment_test.go`) that loads a
+poller-produced inbox/new entry and asserts the JSON contains
+`raw_inline.text` + `raw_inline.permalink` and does NOT contain
+`raw_path`. No code change needed.
 
 ### 2. `harness config init slack` exact stub shape — RESOLVED
 
@@ -406,3 +412,326 @@ PASS: hash matches golden
 
 Reproduced clean across 3 consecutive invocations of the acceptance
 script.
+
+---
+
+# Round 3 additions
+
+PR #2 stays on `track-b/slack-mvp`, rebased onto `origin/main` after design
+PR #5 merged (no conflicts; PR #5 touched only `design/*`). Four
+deliverables from round-3 brief §D1–D4:
+
+## D1. `raw_inline` alignment verified against merged design PR #5
+
+Design PR #5 unified design/02 with design/08 in favor of `raw_inline`.
+The round-2 implementation was already correct (`raw_inline` field tag on
+`InboxItem.RawInline`; no `raw_path` anywhere in the source tree).
+
+**Verification:**
+
+- `grep -rn "raw_inline\\|raw_path" --include="*.go"` shows zero
+  `raw_path` references; the only matches are `raw_inline` in
+  `internal/slack/writer.go` (struct tag), `internal/slack/cli/track.go`
+  (consumer for promotion), and comments / doc strings.
+- New test `internal/slack/raw_inline_alignment_test.go`:
+  - `TestRawInlineAlignmentWithDesign` writes an inbox/new entry via
+    `Writer.WriteInboxNew`, reads it back, generically unmarshals the
+    JSON, and asserts:
+    1. `raw_path` key is absent
+    2. `raw_inline` key is present and is a JSON object
+    3. `raw_inline.text` is a non-empty string
+    4. `raw_inline.permalink` is a non-empty string
+  - `TestInboxItemMarshalUsesRawInlineFieldName` guards the struct tag
+    on `InboxItem.RawInline` against accidental rename to `raw_path`.
+
+Golden mock-acceptance hash unchanged
+(`a1bcd61571d69e299b765e18c6413c3d78cca741bf1e227ab4bf89af9f14d5da`)
+since no on-disk output for the canned scenario changed.
+
+## D2. `slack-poller doctor` subcommand — for the lead's e2e
+
+**New cobra subcommand.** Performs first-boot sanity checks against the
+configured Slack workspace. The lead's REAL e2e against channel
+`C0B071K1SFP` should call this before `slack-poller --once`.
+
+### Signature
+
+```
+slack-poller doctor [--json]
+
+global flags:
+  --state-dir <path>     state/ directory (env HARNESS_STATE; default ./state)
+  --api-url <url>        override slack.com (testing)
+  --log-level <level>    debug|info|warn|error (default info)
+```
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | all checks pass |
+| 1 | hard failure (token missing/invalid, channel inaccessible, missing scope) |
+| 2 | soft signal only (no channels configured, channel exists but history is empty) |
+
+### Checks (in order)
+
+1. **Token check** — resolve via the same path the daemon uses:
+   `auth.token_env`, then `auth.token`, then `auth.token_file`. Reports
+   the source as `env $SLACK_BOT_TOKEN` / `config auth.token` / `file
+   <path>` and the token byte length on success.
+2. **Auth check** — calls Slack's `auth.test`. Reports
+   `authenticated as <bot_name> in workspace <team_name>` on success.
+   On failure, reports the Slack error code (`invalid_auth`,
+   `token_revoked`, `missing_scope`, etc.).
+3. **Channel ping** — calls `conversations.info` for
+   `watch.channels[0]`. Reports `[ok] channel <id> (<name>) -- bot has
+   access` on success; on `not_in_channel`, prints `hint: invite the
+   bot via /invite @<bot> in #<channel>`.
+4. **History ping** — calls `conversations.history?limit=1` for the
+   same channel. An empty result is reported as a soft signal (exit 2),
+   not a failure.
+
+### Output (human-readable)
+
+```
+config: /path/to/state/sources/slack/config.yaml
+[ok]   token from env $SLACK_BOT_TOKEN (length=64)
+[ok]   authenticated as tasker-bot in workspace Acme
+[ok]   channel C0B071K1SFP (project-ai-pioneers) -- bot has access
+summary: all checks passed (exit 0)
+```
+
+### Output (`--json`)
+
+```json
+{
+  "config_path": "...",
+  "token":    { "ok": true, "source": "env $SLACK_BOT_TOKEN", "length": 64 },
+  "auth":     { "ok": true, "bot_name": "tasker-bot", "team_name": "Acme",
+                "bot_id": "B0...", "user_id": "U0..." },
+  "channels": [
+    { "id": "C0B071K1SFP", "name": "project-ai-pioneers", "ok": true,
+      "bot_has_access": true, "history_ok": true }
+  ],
+  "summary":  "all checks passed",
+  "exit_code": 0
+}
+```
+
+The schema is `DoctorReport` in `internal/slack/cli/doctor.go`. Tests:
+`internal/slack/cli/doctor_test.go` covers happy path, token-missing,
+auth-fail (invalid token), channel-not-found, not-in-channel-with-hint,
+empty-history soft exit, no-channels-configured soft exit, missing_scope
+extraction, and JSON output round-trip.
+
+## D3. Actionable auth-fail error messages
+
+### Stderr line on auth failure (exit 3)
+
+Updated `internal/slack/cli/root.go` Execute() to route auth-fail errors
+through a new `FormatAuthError` helper. Mapping:
+
+| Slack error code | Stderr line | Exit |
+|---|---|---|
+| `invalid_auth`, `token_revoked`, `token_expired`, `not_authed`, `account_inactive` | `slack-poller: token invalid (check SLACK_BOT_TOKEN, bot must be in channel)` | 3 |
+| `missing_scope` (with `needed:` clause) | `slack-poller: missing scope: <scope> (grant via Slack app config and reinstall)` | 3 |
+| Any other error | `slack-poller: <verbatim error>` | per CommandError |
+
+### `not_in_channel` → operator-actionable anomaly
+
+`internal/slack/poller.go` now routes `not_in_channel` through a new
+`formatChannelAccessReason` helper. The on-disk anomaly file
+(`state/inbox/anomalies/slack-channel-access-<channel>.json`) reason
+field reads:
+
+```
+bot not in channel; invite via /invite @<bot> in #<channel>
+```
+
+Previously: `slack reported: not_in_channel` (less actionable). The
+poller still disables the channel for the rest of the process lifetime;
+other watched channels keep polling.
+
+### `missing_scope` → exit 3 with scope name
+
+`internal/slack/client.go` exports `MissingScope(err) string` which
+parses slack-go's error text `"missing_scope, needed: <scope>, provided:
+<other>"`. The CLI uses this to inject the missing scope name into the
+stderr line on exit.
+
+### Tests
+
+- `internal/slack/cli/auth_errors_test.go`:
+  `TestFormatAuthError_InvalidAuth` (covers all 5 fatal auth codes),
+  `TestFormatAuthError_MissingScope`,
+  `TestFormatAuthError_NonAuthErrorPassThrough`,
+  `TestFormatAuthError_NilSafe`, `TestAuthFailCode`,
+  `TestMissingScope_Extraction`.
+- `internal/slack/anomaly_actionable_test.go`:
+  `TestFormatChannelAccessReason_NotInChannel` (exact string match),
+  `TestFormatChannelAccessReason_ChannelNotFound`,
+  `TestFormatChannelAccessReason_Unknown`,
+  `TestAnomalyChannelAccess_FileContents` (writes through the writer
+  and asserts JSON on disk).
+- `internal/slack/cli/doctor_test.go`: `TestDoctor_AuthFail_InvalidToken`
+  drives the doctor against a stub client returning `invalid_auth`
+  and asserts the stdout summary includes the canonical line.
+
+## D4. Acceptance split — mock + real
+
+### `scripts/acceptance-slack-poller.sh` (unchanged from round 2)
+
+Still runs the deterministic httptest-backed driver via
+`cmd/acceptance-slack-poller`. Golden hash
+`a1bcd61571d69e299b765e18c6413c3d78cca741bf1e227ab4bf89af9f14d5da`
+unchanged after the round-3 changes — verified post-rebase and
+post-implementation.
+
+### `scripts/acceptance-slack-poller-real.sh` (new)
+
+Hits the REAL Slack workspace. **Skips cleanly with exit 0 + a clear
+message when `SLACK_BOT_TOKEN` or `TEST_SLACK_CHANNEL` is unset, so CI
+default behavior is unchanged.**
+
+Steps when env is present:
+
+1. Build the binary into a tmp dir
+2. Mkdir a fresh state dir + write `state/sources/slack/config.yaml`
+   with `auth.token_env: SLACK_BOT_TOKEN` and
+   `watch.channels: [{id: $TEST_SLACK_CHANNEL}]`. (We deliberately do
+   NOT shell out to `harness config init slack` — that would couple
+   tracks; cf. round-2 coordination §2 on the canonical config shape,
+   which we mirror verbatim.)
+3. Run `slack-poller doctor` — exit non-zero on hard failure (mapped
+   to exit code 3 in the script)
+4. Run `slack-poller --once`
+5. Assert:
+   - `state/sources/slack/cursors/channels/$TEST_SLACK_CHANNEL.json`
+     exists and `last_ts` is non-empty
+   - At least one of: `state/inbox/new/slack-$TEST_SLACK_CHANNEL-*.json`
+     OR `state/threads/slack-$TEST_SLACK_CHANNEL-*/` (both are valid
+     depending on channel activity; empty channel is allowed)
+   - If a sample inbox/new entry exists, it contains `"raw_inline"`
+     and NOT `"raw_path"` (D1 schema check applied to real output)
+6. Lint the compiled binary for forbidden Slack endpoint references
+   (`chat.postMessage`, `chat.update`, `chat.delete`, `reactions.add`,
+   `reactions.remove`) via `strings <binary> | grep`. ZERO matches
+   required.
+7. Print a summary of every file written under the temp state dir;
+   exit 0.
+
+### Script-level lint test
+
+`internal/slack/cli/scripts_lint_test.go`
+`TestRealAcceptanceScriptIsReadOnly` reads
+`scripts/acceptance-slack-poller-real.sh` and asserts:
+
+- the file exists and is executable
+- the skip-if-missing-env path is present (`SLACK_BOT_TOKEN`,
+  `TEST_SLACK_CHANNEL`, `SKIP:`, `exit 0`)
+- it invokes `slack-poller doctor` and `--once`
+- it contains NO `curl chat.postMessage`-style invocations (we do allow
+  the endpoint names to appear in the explicit `forbidden_endpoints`
+  deny-list array that the script greps the binary against — that is
+  the read-only invariant check itself)
+
+---
+
+# To: harness-core-r3
+
+## Namespace discipline (still holds)
+
+All files written by `slack-poller` continue to have basenames or
+directory names matching `^slack-`. Round-3 additions (doctor command,
+acceptance-slack-poller-real script) write nothing — doctor is
+read-only against Slack; the real-acceptance script writes only into
+its own tmp state dir.
+
+## Doctor signature for harness composability
+
+If `harness doctor` wants to compose doctor results from each poller,
+`slack-poller doctor --json` emits the `DoctorReport` JSON shown in §D2
+above. Schema is stable for round 3; if it needs to change for round 4
+we'll bump a version field.
+
+## Stub config compatibility (unchanged)
+
+Round-2 coordination §2 still applies: `auth.token_env`,
+`watch.channels`, `poll_interval` are the required keys; everything
+else has a defaults path. Track A's `harness config init slack` stub
+remains compatible.
+
+---
+
+# To: github-poller-r3
+
+## Namespace discipline (still holds)
+
+All files written by `slack-poller` continue to match `^slack-`. The
+round-3 additions (doctor + real acceptance) do not write under
+`state/inbox/`, `state/threads/`, or `state/sources/github/`. The
+doctor subcommand is read-only against Slack and writes nothing locally.
+
+No collision risk under `state/inbox/anomalies/` — slack anomalies all
+start with `slack-`, e.g. `slack-channel-access-C0492.json`,
+`slack-rate-limit-exhausted-<scope>.json`.
+
+---
+
+# DESIGN AMBIGUITY — LEAD MUST RESOLVE (round 3)
+
+None. The round-2 §1 raw_path/raw_inline ambiguity is now resolved by
+design PR #5. No new ambiguity surfaced during round-3 implementation.
+
+---
+
+# Round-3 deliverable inventory (additions to PR #2)
+
+New files:
+
+- `internal/slack/cli/doctor.go` — `slack-poller doctor` subcommand +
+  `DoctorReport` schema
+- `internal/slack/cli/doctor_test.go` — 9 unit tests covering doctor
+  paths (happy, token-missing, auth-fail, channel-not-found, not-in-
+  channel-hint, empty-history soft, no-channels, missing-scope, JSON)
+- `internal/slack/cli/auth_errors_test.go` — 6 tests for
+  `FormatAuthError`, `AuthFailCode`, `MissingScope`
+- `internal/slack/cli/scripts_lint_test.go` — lints the real
+  acceptance script
+- `internal/slack/raw_inline_alignment_test.go` — D1 verification
+- `internal/slack/anomaly_actionable_test.go` — D3 anomaly content
+- `scripts/acceptance-slack-poller-real.sh` — D4 real e2e
+
+Modified files:
+
+- `internal/slack/client.go` — extend `APIClient` interface with
+  `AuthTest` / `ConversationInfo`; add `AuthFailCode` and `MissingScope`
+  helpers
+- `internal/slack/cli/root.go` — wire `doctor` into the command tree;
+  add `FormatAuthError` and route Execute() stderr through it
+- `internal/slack/poller.go` — operator-actionable anomaly reasons
+  via new `formatChannelAccessReason` helper
+- `coordination/from-slack-poller.md` — this file
+
+# Definition-of-done evidence (round 3)
+
+```
+$ go build ./...
+$ go vet ./...
+$ go vet -tags=integration ./...
+$ go test ./...
+ok  	github.com/victor-develop/advanced-tasker/internal/slack
+ok  	github.com/victor-develop/advanced-tasker/internal/slack/cli
+$ go test -tags=integration ./...
+ok  	github.com/victor-develop/advanced-tasker/internal/slack
+ok  	github.com/victor-develop/advanced-tasker/internal/slack/cli
+$ bash scripts/acceptance-slack-poller.sh
+==> building slack-poller...
+==> running acceptance driver...
+computed hash: a1bcd61571d69e299b765e18c6413c3d78cca741bf1e227ab4bf89af9f14d5da
+PASS: hash matches golden
+==> OK
+$ bash scripts/acceptance-slack-poller-real.sh
+SKIP: SLACK_BOT_TOKEN or TEST_SLACK_CHANNEL not set.
+      Set both to run the REAL Slack e2e (no writes performed).
+```

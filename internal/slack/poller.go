@@ -222,9 +222,16 @@ func (t *PollTargets) includesThread(threadID string) bool {
 }
 
 // handleChannelAccessError records an anomaly and removes the channel from
-// active polling for the rest of this process. Config is not mutated.
+// active polling for the rest of this process. Config is not mutated. The
+// anomaly reason is written in operator-actionable form per design/08
+// §"Error handling" and round-3 §D3, e.g.:
+//
+//	"bot not in channel; invite via /invite @<bot> in #<channel>"
+//
+// for the `not_in_channel` case. Other codes are reported verbatim.
 func (p *Poller) handleChannelAccessError(result *PollResult, channel, reason string) {
-	a := AnomalyChannelAccess(channel, "slack reported: "+reason)
+	actionable := formatChannelAccessReason(channel, reason)
+	a := AnomalyChannelAccess(channel, actionable)
 	wrote, err := p.Writer.WriteAnomaly(a)
 	if err != nil {
 		p.logger().Error("write channel-access anomaly",
@@ -239,7 +246,23 @@ func (p *Poller) handleChannelAccessError(result *PollResult, channel, reason st
 	p.disable(channel)
 	p.logger().Warn("disabling channel for remainder of process",
 		slog.String("channel", channel),
-		slog.String("reason", reason))
+		slog.String("reason", actionable))
+}
+
+// formatChannelAccessReason renders an operator-actionable reason string
+// for an inbox/anomalies channel-access entry. `reason` is the raw Slack
+// code returned by channelAccessError.
+func formatChannelAccessReason(channel, reason string) string {
+	switch reason {
+	case "not_in_channel":
+		return "bot not in channel; invite via /invite @<bot> in #" + channel
+	case "channel_not_found":
+		return "channel " + channel + " not visible to bot (check ID; bot may need to be invited)"
+	case "is_archived":
+		return "channel " + channel + " is archived; remove from watch list or unarchive"
+	default:
+		return "slack reported: " + reason
+	}
 }
 
 // handleThreadAccessError records an anomaly for a 404 / not_in_channel on

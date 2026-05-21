@@ -22,6 +22,31 @@ type APIClient interface {
 	// Permalink optionally fetches the permalink for a message. Errors are
 	// non-fatal; the poller falls back to a blank permalink.
 	Permalink(ctx context.Context, channel, ts string) (string, error)
+	// AuthTest calls Slack's auth.test method. Used by `slack-poller doctor`
+	// to validate the token before launching the daemon.
+	AuthTest(ctx context.Context) (AuthInfo, error)
+	// ConversationInfo calls conversations.info for a single channel. Used
+	// by `slack-poller doctor` to confirm the bot can see the channel.
+	ConversationInfo(ctx context.Context, channelID string) (ChannelInfo, error)
+}
+
+// AuthInfo is the trimmed result of Slack's auth.test response.
+type AuthInfo struct {
+	URL    string
+	Team   string
+	User   string
+	TeamID string
+	UserID string
+	BotID  string
+}
+
+// ChannelInfo is the trimmed result of Slack's conversations.info response.
+type ChannelInfo struct {
+	ID         string
+	Name       string
+	IsMember   bool
+	IsArchived bool
+	IsPrivate  bool
 }
 
 // HistoryParams are the inputs to conversations.history.
@@ -207,6 +232,40 @@ func (s *SlackGoClient) Permalink(ctx context.Context, channel, ts string) (stri
 	return link, nil
 }
 
+// AuthTest calls Slack's auth.test endpoint. Used by the doctor subcommand.
+func (s *SlackGoClient) AuthTest(ctx context.Context) (AuthInfo, error) {
+	resp, err := s.C.AuthTestContext(ctx)
+	if err != nil {
+		return AuthInfo{}, fmt.Errorf("auth.test: %w", err)
+	}
+	return AuthInfo{
+		URL:    resp.URL,
+		Team:   resp.Team,
+		User:   resp.User,
+		TeamID: resp.TeamID,
+		UserID: resp.UserID,
+		BotID:  resp.BotID,
+	}, nil
+}
+
+// ConversationInfo calls Slack's conversations.info endpoint for one channel.
+func (s *SlackGoClient) ConversationInfo(ctx context.Context, channelID string) (ChannelInfo, error) {
+	ch, err := s.C.GetConversationInfoContext(ctx, &sgs.GetConversationInfoInput{
+		ChannelID:     channelID,
+		IncludeLocale: false,
+	})
+	if err != nil {
+		return ChannelInfo{}, fmt.Errorf("conversations.info %s: %w", channelID, err)
+	}
+	return ChannelInfo{
+		ID:         ch.ID,
+		Name:       ch.Name,
+		IsMember:   ch.IsMember,
+		IsArchived: ch.IsArchived,
+		IsPrivate:  ch.IsPrivate,
+	}, nil
+}
+
 // convertMsg converts a slack-go Message to our internal Message. We
 // re-marshal blocks/reactions to json.RawMessage to keep them opaque.
 func convertMsg(m sgs.Message, channel string) Message {
@@ -311,4 +370,59 @@ func channelAccessError(err error) string {
 		}
 	}
 	return ""
+}
+
+// AuthFailCode extracts the canonical Slack error code from an auth-fail
+// error returned by the slack-go client. Returns the empty string if err
+// does not look like an auth failure. Used by the daemon top-level to
+// craft operator-actionable stderr messages per design/08 §"Error handling".
+func AuthFailCode(err error) string {
+	if err == nil {
+		return ""
+	}
+	var sre sgs.SlackErrorResponse
+	if errors.As(err, &sre) {
+		if _, ok := fatalAuthCodes[sre.Err]; ok {
+			return sre.Err
+		}
+	}
+	msg := err.Error()
+	// Prefer specific codes over generic ones so operators get the most
+	// actionable hint.
+	priority := []string{
+		"token_revoked", "token_expired", "account_inactive",
+		"missing_scope", "invalid_auth", "not_authed",
+	}
+	for _, c := range priority {
+		if strings.Contains(msg, c) {
+			return c
+		}
+	}
+	return ""
+}
+
+// MissingScope extracts the scope name from a Slack `missing_scope` error,
+// if present. Slack returns the missing scope in the `needed` field; the
+// slack-go library surfaces it inside the error text. Returns "" when the
+// error is not a missing_scope one or the scope cannot be identified.
+func MissingScope(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "missing_scope") {
+		return ""
+	}
+	// slack-go formats this as "missing_scope, needed: <scope>, provided: <scope>"
+	const needle = "needed:"
+	idx := strings.Index(msg, needle)
+	if idx < 0 {
+		return ""
+	}
+	rest := strings.TrimSpace(msg[idx+len(needle):])
+	end := strings.IndexAny(rest, ",;\n\t ")
+	if end < 0 {
+		return rest
+	}
+	return strings.TrimSpace(rest[:end])
 }

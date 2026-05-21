@@ -120,6 +120,7 @@ See design/08-slack-poller.md for the full spec.`,
 		newUntrackThreadCmd(opts),
 		newStatusCmd(opts),
 		newForcePollCmd(opts),
+		newDoctorCmd(opts),
 	)
 	return root
 }
@@ -139,10 +140,28 @@ func Execute(ctx context.Context, args []string) int {
 	root.SetOut(os.Stdout)
 	root.SetErr(os.Stderr)
 	if err := root.ExecuteContext(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "slack-poller: %v\n", err)
+		fmt.Fprintln(os.Stderr, FormatAuthError(err))
 		return ExtractExitCode(err)
 	}
 	return 0
+}
+
+// FormatAuthError converts an error from a command into the stderr line
+// printed on exit. Auth failures and missing-scope errors get a fixed
+// operator-actionable phrasing so playbooks can grep on them; everything
+// else flows through unchanged with a `slack-poller:` prefix.
+func FormatAuthError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, slackpkg.ErrFatalAuth) || slackpkg.IsFatalAuthError(err) {
+		if scope := slackpkg.MissingScope(err); scope != "" {
+			return "slack-poller: missing scope: " + scope +
+				" (grant via Slack app config and reinstall)"
+		}
+		return "slack-poller: token invalid (check SLACK_BOT_TOKEN, bot must be in channel)"
+	}
+	return "slack-poller: " + err.Error()
 }
 
 // resolveStateDir returns the configured state directory, defaulting to
