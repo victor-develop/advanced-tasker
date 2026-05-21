@@ -1,8 +1,9 @@
 // Package state owns the on-disk layout of state/ and the harness init
 // command. It is responsible for creating every subdirectory that the
 // design contract guarantees will be present after `harness init`, for
-// seeding the default config.yaml, the role prompt files, the .gitignore,
-// and a placeholder post-commit hook.
+// seeding the default config.yaml, the role prompt files, the
+// .gitignore, the audit checklist, and the post-commit hook that
+// re-validates rollup append-only ledger + human-pin invariants.
 package state
 
 import (
@@ -80,6 +81,15 @@ audit:
   watch_only_to_commander: true
 rollup:
   debounce: 30s
+outbox:
+  # sender_enabled=false is the round-3 safety net: the outbox-sender
+  # daemon still runs but never calls Slack/GitHub APIs. Items in
+  # outbox/pending/ are moved to outbox/awaiting-human/ instead, so an
+  # operator must opt in explicitly via:
+  #   harness config set outbox.sender_enabled true
+  # Existing pre-round-3 state directories (no key present) default to
+  # true for backwards compatibility — see internal/outbox.SenderEnabled.
+  sender_enabled: false
 sources:
   slack:
     enabled: true

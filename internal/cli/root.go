@@ -55,6 +55,7 @@ func New() *cobra.Command {
 
 	root.AddCommand(
 		newInitCmd(opts),
+		newBootCmd(opts),
 		newVersionCmd(opts),
 		newConfigCmd(opts),
 		newGoalCmd(opts),

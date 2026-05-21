@@ -3,12 +3,11 @@
 // pure over the state directory — they read files and produce strings,
 // never mutate anything.
 //
-// In MVP we render three views: the full commander dashboard, a
-// cold-start "brief" view, and a `pickup` listing. Sections specified
-// by design/04 that depend on subsystems not yet built in MVP
-// (threads / inbox / pending review / pins / tick-log) are still
-// emitted but mark themselves explicitly empty so the contract is
-// preserved.
+// Three views are rendered: the full commander dashboard, a cold-start
+// "brief" view, and a `pickup` listing. The dashboard surfaces every
+// design/04 section (PINNED / DELTA / TASKS / THREADS / PENDING REVIEW
+// / RECENT TICK LOG / AVAILABLE COMMANDS) and marks each empty bucket
+// explicitly so the contract holds even on a fresh state directory.
 package render
 
 import (
@@ -329,13 +328,18 @@ func tickLogSection(b *strings.Builder, stateRoot string) {
 }
 
 func commandsHint(b *strings.Builder) {
+	// Verbatim from design/04 §"AVAILABLE COMMANDS" — do not paraphrase.
 	b.WriteString("──── AVAILABLE COMMANDS ────────────────────────────────────\n")
-	b.WriteString("harness goal create \"<title>\"\n")
-	b.WriteString("harness task create|update|kill|defer|split|merge|restate-goal\n")
-	b.WriteString("harness link <T-a> blocked-on <T-b> | harness unlink <T-a> <T-b>\n")
-	b.WriteString("harness deps show <T-n> | harness deps cycles\n")
-	b.WriteString("harness task ls | harness task show <T-n>\n")
-	b.WriteString("(MVP: dispatch/review/outbox/pin/triage not yet implemented — see TASKS.md)\n")
+	b.WriteString("harness triage <id> --action=...\n")
+	b.WriteString("harness dispatch T-<n> --role=...\n")
+	b.WriteString("harness review J-<id> --action=...\n")
+	b.WriteString("harness outbox send --to=... --thread=... --body=... --risk=...\n")
+	b.WriteString("harness task update|kill|defer|merge|split|link|unlink\n")
+	b.WriteString("harness pin renew P-<id>\n")
+	b.WriteString("harness rollup flush <thread-id>\n")
+	b.WriteString("harness tick-log append \"...\"\n")
+	b.WriteString("harness tick end --summary \"...\"\n")
+	b.WriteString("(use --help on any verb for full args)\n")
 }
 
 // Brief returns a cold-start summary for an external agent picking up

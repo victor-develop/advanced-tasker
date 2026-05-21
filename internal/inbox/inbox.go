@@ -29,6 +29,12 @@ const (
 var AllBuckets = []Bucket{BucketNew, BucketUpdates, BucketHuman, BucketAgentReports, BucketAnomalies}
 
 // Item is the canonical inbox JSON shape (design/02 §inbox/<bucket>).
+//
+// Per design/02 §"Raw event location" (round-3 clarification): the raw
+// payload for an item in inbox/new/ lives **inline** under `raw_inline`.
+// `RawPath` is preserved for backwards compatibility with pre-round-3
+// fixtures but pollers and triage/track CLI consumers MUST write/read
+// `raw_inline` going forward.
 type Item struct {
 	ID         string    `json:"id"`
 	Source     string    `json:"source"`
@@ -36,6 +42,7 @@ type Item struct {
 	ReceivedAt time.Time `json:"received_at"`
 	Summary    string    `json:"summary"`
 	Ref        any       `json:"ref,omitempty"`
+	RawInline  any       `json:"raw_inline,omitempty"`
 	RawPath    string    `json:"raw_path,omitempty"`
 }
 

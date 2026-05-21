@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -17,6 +18,12 @@ import (
 	"github.com/victor-develop/advanced-tasker/internal/store"
 	"github.com/victor-develop/advanced-tasker/internal/threads"
 )
+
+// jsonMarshalIndent is the same as encoding/json.MarshalIndent — wrapped
+// to make the inbox handler's use of it explicit.
+func jsonMarshalIndent(v any) ([]byte, error) {
+	return json.MarshalIndent(v, "", "  ")
+}
 
 // newInboxCmd implements `harness inbox ls|show`.
 func newInboxCmd(opts *Options) *cobra.Command {
@@ -140,6 +147,17 @@ func newTriageCmd(opts *Options) *cobra.Command {
 					}
 					if err := threads.WriteMeta(root, meta); err != nil {
 						return errf(ExitValidation, "%v", err)
+					}
+					// Per design/02 §"Raw event location": promote raw_inline
+					// (if present) into threads/<id>/raw/<event>.json so the
+					// rollup updater can read it on the next pass.
+					if it.RawInline != nil {
+						rawBody, _ := jsonMarshalIndent(it.RawInline)
+						eventName := fmt.Sprintf("promoted-%d.json", time.Now().UnixNano())
+						rp := filepath.Join(threads.RawDir(root, threadID), eventName)
+						if err := os.MkdirAll(filepath.Dir(rp), 0o755); err == nil {
+							_ = os.WriteFile(rp, rawBody, 0o644)
+						}
 					}
 					_ = threads.MarkDirty(root, threadID)
 					_ = os.Remove(path)

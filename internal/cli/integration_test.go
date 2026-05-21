@@ -5,7 +5,20 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/victor-develop/advanced-tasker/internal/daemon"
+	"github.com/victor-develop/advanced-tasker/internal/llm"
 )
+
+// newSenderForTest builds an outbox sender wired to a fake LLM driver
+// and pointed at the given state root. ProvideProviderSend is left
+// nil — the test exercising sender_enabled=false never reaches the
+// provider call, and the gating happens before that branch.
+func newSenderForTest(t *testing.T, root string) *daemon.OutboxSender {
+	t.Helper()
+	bus := daemon.NewBus(root, llm.NewFake(t.TempDir()))
+	return daemon.NewOutboxSender(bus)
+}
 
 // TestDispatchRoundtrip exercises the full dispatch → render →
 // submit-report → review pipeline.
@@ -437,6 +450,49 @@ func TestAuditRunProducesReport(t *testing.T) {
 	entries, _ := os.ReadDir(filepath.Join(root, "audit", "reports"))
 	if len(entries) == 0 {
 		t.Errorf("audit report not written")
+	}
+}
+
+// TestOutboxSenderEnabledFalseDefersToAwaitingHuman: when config has
+// outbox.sender_enabled=false, the sender daemon moves the pending
+// item to awaiting-human/ without invoking any provider call. Round-3
+// D5 acceptance.
+func TestOutboxSenderEnabledFalseDefersToAwaitingHuman(t *testing.T) {
+	root := initState(t)
+	// Force the explicit-false case (fresh `harness init` already
+	// seeds false in the round-3 default, but be defensive — older
+	// state directories the test framework reuses might differ).
+	if _, _, code := runCLI(t, root, "config", "set", "outbox.sender_enabled", "false"); code != ExitOK {
+		t.Fatalf("set sender_enabled=false: %d", code)
+	}
+	// Drop a low-risk pending item directly (avoid go-imports
+	// dependency on the outbox/risk paths in this test).
+	bodyFile := filepath.Join(t.TempDir(), "msg.md")
+	os.WriteFile(bodyFile, []byte("hi"), 0o644)
+	out, _, code := runCLI(t, root, "outbox", "send",
+		"--to", "slack", "--thread", "slack-C1-1", "--risk", "low",
+		"--body", bodyFile)
+	if code != ExitOK {
+		t.Fatalf("outbox send failed: %d", code)
+	}
+	id := strings.TrimSpace(out)
+	pendingPath := filepath.Join(root, "outbox", "pending", id+".yaml")
+	awaitPath := filepath.Join(root, "outbox", "awaiting-human", id+".yaml")
+	if _, err := os.Stat(pendingPath); err != nil {
+		t.Fatalf("expected item in pending/ before daemon runs: %v", err)
+	}
+
+	// Run the sender daemon body inline. We invoke ProcessOnce so we
+	// don't have to manage goroutine lifecycle in the test.
+	if err := newSenderForTest(t, root).ProcessOnce(id); err != nil {
+		t.Fatalf("sender.ProcessOnce: %v", err)
+	}
+
+	if _, err := os.Stat(pendingPath); err == nil {
+		t.Errorf("expected item moved out of pending/ after deferral")
+	}
+	if _, err := os.Stat(awaitPath); err != nil {
+		t.Errorf("expected item in awaiting-human/, got %v", err)
 	}
 }
 

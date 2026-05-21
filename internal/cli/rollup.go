@@ -111,6 +111,14 @@ func rollupUpdateCmd(opts *Options) *cobra.Command {
 					emitRollupAnomaly(root, id, fmt.Sprintf("schema parse: %v", err))
 					return errf(ExitValidation, "schema parse: %v", err)
 				}
+				// Step 0.5 (design/05): frontmatter.id MUST equal the
+				// thread directory name. Runs before any other validation
+				// so that a mis-routed write never reaches the file
+				// system. The daemon must NOT retry on this error.
+				if err := rollup.CheckFrontmatterID(newR, id); err != nil {
+					emitRollupAnomaly(root, id, err.Error())
+					return errf(ExitValidation, "%v", err)
+				}
 				if err := newR.Validate(); err != nil {
 					emitRollupAnomaly(root, id, fmt.Sprintf("schema validate: %v", err))
 					return errf(ExitValidation, "schema validate: %v", err)
@@ -320,7 +328,7 @@ func rollupVerifyCommitCmd(opts *Options) *cobra.Command {
 	var file string
 	c := &cobra.Command{
 		Use:    "verify-commit",
-		Short:  "post-commit hook helper: re-validate ledger+pins for a tracked rollup",
+		Short:  "post-commit hook helper: re-validate id+ledger+pins for a tracked rollup",
 		Hidden: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			root, err := requireInitialized(opts)
@@ -331,18 +339,31 @@ func rollupVerifyCommitCmd(opts *Options) *cobra.Command {
 				return errf(ExitUsage, "--file required")
 			}
 			r := gitops.Repo{Dir: root}
-			oldBody, err := r.ShowAt("HEAD~1", file)
-			if err != nil {
-				return nil // first version of the file — nothing to compare against
-			}
 			newBody, err := r.ShowAt("HEAD", file)
 			if err != nil {
 				return errf(ExitValidation, "%v", err)
 			}
-			oldR, err1 := rollup.Parse(oldBody)
-			newR, err2 := rollup.Parse(newBody)
-			if err1 != nil || err2 != nil {
-				return errf(ExitValidation, "parse: %v / %v", err1, err2)
+			newR, err := rollup.Parse(newBody)
+			if err != nil {
+				return errf(ExitValidation, "parse: %v", err)
+			}
+			// Step 0.5: frontmatter.id matches thread directory. This
+			// runs FIRST so a smuggled-in mis-id commit is caught even
+			// when there's no HEAD~1 to diff against (e.g., first
+			// rollup landing on a tracked thread).
+			threadDir := threadDirFromPath(file)
+			if threadDir != "" {
+				if err := rollup.CheckFrontmatterID(newR, threadDir); err != nil {
+					return errf(ExitValidation, "%v", err)
+				}
+			}
+			oldBody, oerr := r.ShowAt("HEAD~1", file)
+			if oerr != nil {
+				return nil // first version of the file — nothing else to compare
+			}
+			oldR, err := rollup.Parse(oldBody)
+			if err != nil {
+				return errf(ExitValidation, "parse old: %v", err)
 			}
 			if err := rollup.CheckAppendOnly(oldR.DecisionsLines, newR.DecisionsLines); err != nil {
 				return errf(ExitValidation, "ledger violation: %v", err)
@@ -355,6 +376,27 @@ func rollupVerifyCommitCmd(opts *Options) *cobra.Command {
 	}
 	c.Flags().StringVar(&file, "file", "", "tracked rollup path within state/")
 	return c
+}
+
+// threadDirFromPath extracts the <id> component from
+// "threads/<id>/rollup.md" so the post-commit hook can check
+// frontmatter.id matches. Returns "" if the path doesn't look like a
+// rollup.
+func threadDirFromPath(p string) string {
+	// Accept both "threads/<id>/rollup.md" and OS-native separators.
+	p = strings.ReplaceAll(p, "\\", "/")
+	if !strings.HasPrefix(p, "threads/") {
+		return ""
+	}
+	if !strings.HasSuffix(p, "/rollup.md") {
+		return ""
+	}
+	id := strings.TrimPrefix(p, "threads/")
+	id = strings.TrimSuffix(id, "/rollup.md")
+	if strings.Contains(id, "/") {
+		return ""
+	}
+	return id
 }
 
 // emitRollupAnomaly writes an anomaly entry under inbox/anomalies/.

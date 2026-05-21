@@ -110,6 +110,19 @@ func (r *Rollup) Validate() error {
 	return nil
 }
 
+// CheckFrontmatterID enforces design/05 §"Step 0.5: Frontmatter ID
+// matches thread directory". The check is strict string equality — no
+// trimming, no case folding. Mismatch is an LLM output bug, NOT a
+// transient failure; the updater daemon must not retry on this error.
+//
+// Returns nil if the rollup's frontmatter.id matches threadDir.
+func CheckFrontmatterID(r *Rollup, threadDir string) error {
+	if r.Front.ID != threadDir {
+		return fmt.Errorf("frontmatter.id (%s) does not match thread directory (%s)", r.Front.ID, threadDir)
+	}
+	return nil
+}
+
 // CheckAppendOnly compares the OLD vs NEW Decisions ledger lines and
 // enforces design/05 §"Step 2: Append-only ledger check": every old
 // line must appear in new content, unchanged and in order; new lines

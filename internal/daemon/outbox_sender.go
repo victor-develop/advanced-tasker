@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/victor-develop/advanced-tasker/internal/gitops"
@@ -36,6 +37,13 @@ func NewOutboxSender(bus *Bus) *OutboxSender {
 	}
 }
 
+// ProcessOnce processes a single pending outbox item by id. Used by
+// integration tests that exercise sender behavior (sender_enabled gate,
+// rate limits, deferrals) without spinning up the daemon goroutine.
+func (s *OutboxSender) ProcessOnce(id string) error {
+	return s.process(id)
+}
+
 // Run blocks until ctx is cancelled.
 func (s *OutboxSender) Run(ctx context.Context) error {
 	for {
@@ -58,6 +66,21 @@ func (s *OutboxSender) process(id string) error {
 		it, err := outbox.Read(path)
 		if err != nil {
 			return err
+		}
+		// Round-3 D5 safety gate: when outbox.sender_enabled=false,
+		// the daemon RUNS but never touches the provider. Items in
+		// pending/ are deflected to awaiting-human/ which already
+		// requires an explicit `harness outbox approve` before any
+		// future send attempt.
+		if !outbox.SenderEnabled(root) {
+			// stderr-style notice so operators see the deferral when
+			// running autopilot from the foreground.
+			fmt.Fprintf(os.Stderr, "outbox.sender_enabled=false: deferring O-%s to awaiting-human\n", strings.TrimPrefix(id, "O-"))
+			s.Bus.Log("outbox-sender %s: sender_enabled=false → awaiting-human", id)
+			if _, err := outbox.Move(root, it, outbox.StatePending, outbox.StateAwaitingHuman); err != nil {
+				return err
+			}
+			return nil
 		}
 		lim, _ := outbox.LoadLimits(root)
 		now := time.Now().UTC()

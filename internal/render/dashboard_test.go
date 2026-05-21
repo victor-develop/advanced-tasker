@@ -130,3 +130,41 @@ func writeFakeInbox(root, bucket, name string) error {
 	path := root + "/inbox/" + bucket + "/" + name
 	return os.WriteFile(path, []byte("{}\n"), 0o644)
 }
+
+// TestDashboard_CommandsCheatSheet verifies the AVAILABLE COMMANDS block
+// matches design/04 verbatim and that the round-1 MVP placeholder line
+// is no longer rendered (round-3 D1).
+func TestDashboard_CommandsCheatSheet(t *testing.T) {
+	root := t.TempDir() + "/state"
+	if err := state.Init(root); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Dashboard(root, DashboardOptions{Budget: 8000, Now: fixedNow})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The obsolete round-1 disclaimer must be gone.
+	if strings.Contains(got, "MVP: dispatch/review/outbox/pin/triage not yet implemented") {
+		t.Errorf("obsolete MVP disclaimer still present\n%s", got)
+	}
+	// Every line from design/04 §AVAILABLE COMMANDS must be present
+	// verbatim.
+	wants := []string{
+		"──── AVAILABLE COMMANDS ────────────────────────────────────",
+		"harness triage <id> --action=...",
+		"harness dispatch T-<n> --role=...",
+		"harness review J-<id> --action=...",
+		"harness outbox send --to=... --thread=... --body=... --risk=...",
+		"harness task update|kill|defer|merge|split|link|unlink",
+		"harness pin renew P-<id>",
+		"harness rollup flush <thread-id>",
+		`harness tick-log append "..."`,
+		`harness tick end --summary "..."`,
+		"(use --help on any verb for full args)",
+	}
+	for _, w := range wants {
+		if !strings.Contains(got, w) {
+			t.Errorf("missing verbatim line %q\n--- got ---\n%s", w, got)
+		}
+	}
+}

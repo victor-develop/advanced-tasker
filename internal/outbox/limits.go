@@ -140,6 +140,41 @@ func channelPrefix(thread string) string {
 	return thread
 }
 
+// SenderEnabled reports whether the outbox sender daemon is allowed to
+// call upstream provider APIs.
+//
+// Per round-3 D5: the value lives at `outbox.sender_enabled` in
+// state/config.yaml. Missing key → defaults to TRUE for backwards
+// compatibility with pre-round-3 state directories (those keep the
+// round-2 sender behavior the acceptance script depends on). The
+// `harness init` template seeds the key explicitly as FALSE so freshly
+// initialized harnesses are safe-by-default.
+func SenderEnabled(stateRoot string) bool {
+	b, err := os.ReadFile(filepath.Join(stateRoot, "config.yaml"))
+	if err != nil {
+		return true
+	}
+	var raw map[string]any
+	if err := yaml.Unmarshal(b, &raw); err != nil {
+		return true
+	}
+	out, ok := raw["outbox"].(map[string]any)
+	if !ok {
+		return true
+	}
+	v, present := out["sender_enabled"]
+	if !present {
+		return true
+	}
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		return !strings.EqualFold(x, "false")
+	}
+	return true
+}
+
 // DuplicateCheck rejects sends identical to one in the last 10 minutes
 // (content + thread + sender). Returns an error on duplicate detection.
 func DuplicateCheck(stateRoot string, it *Item, now time.Time) error {
