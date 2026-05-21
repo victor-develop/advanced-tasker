@@ -67,7 +67,17 @@ func (p *Poller) honorRateLimit(ctx context.Context, err error, endpoint, target
 			"reset", reset, "want_sleep", d, "cap", MaxRateLimitSleep)
 		return false, nil
 	}
-	p.Logger.Warn("rate limited; sleeping until reset",
+	// Round-3 brief D2 verifies the log line format here:
+	//   [rate-limit] sleeping until <iso> (N sec)
+	// We carry the structured `endpoint` / `target` keys alongside for
+	// observability.  The `msg` field below is the human-grep-friendly
+	// rendering operators expect.
+	resetISO := reset.UTC().Format(time.RFC3339)
+	if reset.IsZero() {
+		resetISO = "unknown"
+	}
+	p.Logger.Warn(
+		fmt.Sprintf("[rate-limit] sleeping until %s (%d sec)", resetISO, int(d.Seconds())),
 		"endpoint", endpoint, "target", target, "sleep", d, "reset", reset)
 	if err := sleepCtx(ctx, d); err != nil {
 		return false, err
@@ -123,6 +133,12 @@ func (p *Poller) RunOnce(ctx context.Context) (*CycleStats, error) {
 			stats.Errors++
 			p.Logger.Error("repo discovery failed",
 				"repo", repo.String(), "error", err)
+			// Round-3 D2: auth/scope errors are terminal — propagate so
+			// the CLI layer can emit the actionable message and exit 3
+			// instead of looping forever in the daemon.
+			if IsAuthTerminal(err) {
+				return stats, err
+			}
 		}
 	}
 
@@ -149,6 +165,9 @@ func (p *Poller) RunOnce(ctx context.Context) (*CycleStats, error) {
 	sem := make(chan struct{}, p.Config.MaxConcurrent)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
+	// Round-3 D2: capture the first auth-terminal error so it surfaces
+	// to RunOnce's caller (the daemon loop / force-poll / once mode).
+	var authErr error
 	for _, j := range jobs {
 		if err := ctx.Err(); err != nil {
 			break
@@ -163,6 +182,13 @@ func (p *Poller) RunOnce(ctx context.Context) (*CycleStats, error) {
 				local.Errors++
 				p.Logger.Error("pr poll failed",
 					"repo", j.repo.String(), "number", j.number, "error", err)
+				if IsAuthTerminal(err) {
+					mu.Lock()
+					if authErr == nil {
+						authErr = err
+					}
+					mu.Unlock()
+				}
 			}
 			mu.Lock()
 			stats.PRsPolled += local.PRsPolled
@@ -176,7 +202,30 @@ func (p *Poller) RunOnce(ctx context.Context) (*CycleStats, error) {
 	}
 	wg.Wait()
 
+	if authErr != nil {
+		return stats, authErr
+	}
 	return stats, nil
+}
+
+// IsAuthTerminal reports whether err is a wrapped 401 or 403-non-rate-limit
+// from the poller.  Used by RunOnce to short-circuit the cycle so the
+// caller can emit the actionable message and exit 3.
+func IsAuthTerminal(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Unwrap one layer (the discoverPRs / pollPR wrappers use
+	// fmt.Errorf("unauthorized: %w", err) and
+	// fmt.Errorf("forbidden: %w", err)).
+	if IsUnauthorized(err) || IsForbiddenNonRateLimit(err) {
+		return true
+	}
+	type unwrapper interface{ Unwrap() error }
+	if u, ok := err.(unwrapper); ok {
+		return IsAuthTerminal(u.Unwrap())
+	}
+	return false
 }
 
 // archiveDeletedPR is the 404-on-tracked-PR handler.  It:
@@ -279,6 +328,13 @@ func (p *Poller) discoverPRs(ctx context.Context, r RepoRef, stats *CycleStats) 
 			}
 			if IsUnauthorized(err) {
 				return fmt.Errorf("unauthorized: %w", err)
+			}
+			if IsForbiddenNonRateLimit(err) {
+				// 403 without rate-limit headers = scope or org-SSO
+				// issue.  Surface as a terminal error so run / force-poll
+				// can emit the actionable stderr line and exit 3 (see
+				// design/09 §"Error handling" round-3 clarification).
+				return fmt.Errorf("forbidden: %w", err)
 			}
 			if IsMalformed(err) {
 				p.Logger.Warn("malformed request to list open prs; recording anomaly",
@@ -418,6 +474,9 @@ func (p *Poller) pollPR(ctx context.Context, r RepoRef, number int, stats *Cycle
 		}
 		if IsUnauthorized(err) {
 			return fmt.Errorf("unauthorized: %w", err)
+		}
+		if IsForbiddenNonRateLimit(err) {
+			return fmt.Errorf("forbidden: %w", err)
 		}
 		if IsMalformed(err) {
 			p.Logger.Warn("malformed get-pull response; recording anomaly",

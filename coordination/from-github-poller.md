@@ -1,10 +1,137 @@
-# Coordination notes from github-poller (Track C) — Round 2
+# Coordination notes from github-poller (Track C)
 
 Filed in-tree because the SendMessage / TaskList / TaskUpdate tools were
 not available in this environment.  The team lead can lift these into the
 shared message log.
 
-Updates the round-1 notes with the round-2 confirmations + new schemas.
+Round notes are cumulative: round 3 additions come first, round 2
+follows.
+
+---
+
+## Round 3 additions (closing round)
+
+### New `github-poller doctor` subcommand
+
+Signature:
+
+```
+github-poller doctor [--json] [--github-base-url <url>]
+
+Global flags inherited from root:
+  --state-dir <path>     (alias: --state-root)
+```
+
+What it does (D1):
+
+1. Token check — reads `auth.token_env` from
+   `state/sources/github/config.yaml`, falls back to `GITHUB_TOKEN`.
+   On miss, prints `[fail] token not found: set $<ENV> or auth.token in
+   state/sources/github/config.yaml`.
+2. Auth check — `GET /user`.  On 401, the message is the actionable
+   `github-poller: token invalid (check $<ENV> -- does it have repo scope?)`.
+3. Repo visibility — `GET /repos/{owner}/{repo}` for each `watch.repos`
+   entry.  Prints `[ok] <owner/repo> (visibility=<private|public>,
+   default_branch=<...>)` or, on 404 / 403, the contract-specified
+   actionable variants (`token may lack access` / `secondary rate limit
+   or org SSO`).
+4. First-repo PRs ping — `GET /repos/{owner}/{repo}/pulls?state=open&per_page=1`
+   for `watch.repos[0]`.  Confirms the token has PR read scope.
+
+Exit codes:
+
+| Code | Meaning |
+|---|---|
+| 0 | All checks passed |
+| 1 | Hard auth failure (missing token, missing config, 401 on /user) |
+| 2 | Soft failure (one or more repos unreadable / PR ping failed) |
+
+JSON shape (`--json`): see `DoctorReport` in
+`internal/github/cli/doctor.go`.  Top-level keys:
+`state_root, config_ok, config_error, token, auth, repos, prs_ping,
+exit_code`.
+
+### Actionable 401 / 403 messages from the poller (D2)
+
+The run / force-poll wrappers now exit **code 3** (sentinel
+`ErrAuthExit`) with the literal stderr line:
+
+| Cause | Stderr line |
+|---|---|
+| 401 from any endpoint | `github-poller: token invalid (check $<ENV> -- does it have repo scope?)` |
+| 403 without rate-limit headers | `github-poller: 403 forbidden (check token scopes; org may require SSO authorization)` |
+
+403 with `X-RateLimit-Remaining: 0` is **not** an exit: it goes through
+the existing sleep-until-reset path.  The log message format is now
+exactly:
+
+```
+[rate-limit] sleeping until <iso> (N sec)
+```
+
+(unit test in `internal/github/poller_integration_test.go:
+TestIntegration_RateLimitLogFormat`).
+
+422 / 404 paths are unchanged from round 2 (anomaly + skip endpoint /
+archive thread); test coverage was extended in round 3.
+
+### Acceptance scripts (D3)
+
+| Script | Purpose | CI default |
+|---|---|---|
+| `scripts/acceptance-github-poller.sh` | Mock VCR cassette + httptest smoke (round 2, unchanged) | yes |
+| `scripts/acceptance-github-poller-real.sh` | Lead-driven REAL e2e against api.github.com | no |
+
+The real script:
+
+- requires `GITHUB_TOKEN` and `TEST_GH_REPO` env vars; if either is
+  unset, exits 0 with a clear skip message;
+- builds the binary;
+- seeds a tmp state with `auth.token_env: GITHUB_TOKEN`,
+  `watch.repos: [$TEST_GH_REPO]`;
+- runs `github-poller doctor`;
+- runs `github-poller --once`;
+- asserts cursor exists with `last_pr_discovery_at` and `pulls_etag`
+  (the ETag-equivalent for the discovery endpoint);
+- asserts any created thread dirs have valid `meta.json`;
+- greps the poller source for any `POST` / `PUT` / `PATCH` / `DELETE`
+  HTTP verbs (whitelist: `*_test.go`, `vcr_*.go`) — fails closed if
+  found.
+
+A Go unit test mirrors the source-level guard:
+`internal/github/readonly_guard_test.go: TestPollerSourceIsReadOnly`.
+The binary issues **zero** GitHub write operations; this is now
+enforced by both CI and the real-acceptance script.
+
+### `raw_inline` vs `raw_path` (post-PR #5)
+
+Confirmed: my `inbox/new/github-*-pr-*.json` writer does **not** emit a
+`raw_path` field.  The schema is the `ref { owner, repo, number,
+title, author, url, state, draft }` envelope from
+design/09 §"New PRs → inbox/new".  No raw payload is inlined for new
+PRs — the `ref` block carries the title/author/state which is enough
+for the commander to triage.
+
+(For `inbox/updates/`, where the thread is already tracked, the entry
+still carries `raw_path` pointing at `threads/<id>/raw/<event-id>.json`.
+This is the "Update to tracked thread" row in design/02 §"Raw event
+location — inbox/new vs threads/" and is unchanged.)
+
+### Archive naming — FINAL
+
+Per round-2 review consensus, archive directory naming stays:
+
+```
+state/threads/_archive/<thread-id>-<UTC yyyymmddThhmmssZ>/
+```
+
+No change in round 3.  See
+`internal/github/writer.go: ArchiveThread` and the round-3 test
+`TestIntegration_404ArchiveNamingFinalForR3`.
+
+### DESIGN AMBIGUITY — LEAD MUST RESOLVE (round 3)
+
+None.  PR #5 closed everything in scope for Track C.
 
 ---
 

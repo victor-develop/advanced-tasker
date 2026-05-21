@@ -263,6 +263,62 @@ func (c *Client) ListReviews(ctx context.Context, r RepoRef, number int, ifNoneM
 	}, nil
 }
 
+// --- doctor helpers --------------------------------------------------------
+
+// AuthenticatedUser calls GET /user and returns (login, id, error).  Used
+// by the `doctor` subcommand to validate that a token works at all before
+// touching repo-scoped endpoints.  Read-only; no side effects.
+func (c *Client) AuthenticatedUser(ctx context.Context) (string, int64, error) {
+	u, _, err := c.gh.Users.Get(ctx, "")
+	if err != nil {
+		return "", 0, classifyError(err)
+	}
+	return u.GetLogin(), u.GetID(), nil
+}
+
+// GetRepoVisibility calls GET /repos/{owner}/{repo} and returns
+// (visibility, default_branch, status_code, error).  status_code is set
+// even on error responses (404 / 403) so the caller can render the
+// design-specified actionable message.
+//
+// Used by the `doctor` subcommand only.
+func (c *Client) GetRepoVisibility(ctx context.Context, r RepoRef) (string, string, int, error) {
+	repo, resp, err := c.gh.Repositories.Get(ctx, r.Owner, r.Repo)
+	status := 0
+	if resp != nil && resp.Response != nil {
+		status = resp.Response.StatusCode
+	}
+	if err != nil {
+		return "", "", status, classifyError(err)
+	}
+	visibility := repo.GetVisibility()
+	if visibility == "" {
+		if repo.GetPrivate() {
+			visibility = "private"
+		} else {
+			visibility = "public"
+		}
+	}
+	return visibility, repo.GetDefaultBranch(), status, nil
+}
+
+// CountOpenPRsSample calls GET /repos/{owner}/{repo}/pulls?state=open&per_page=1
+// and returns the count of PRs in the response (0 or 1).  This is the
+// "first-repo PRs ping" used by `doctor` to confirm the token has PR
+// read scope, without burning a full pagination.
+func (c *Client) CountOpenPRsSample(ctx context.Context, r RepoRef) (int, error) {
+	prs, _, err := c.gh.PullRequests.List(ctx, r.Owner, r.Repo, &gh.PullRequestListOptions{
+		State: "open",
+		ListOptions: gh.ListOptions{
+			PerPage: 1,
+		},
+	})
+	if err != nil {
+		return 0, classifyError(err)
+	}
+	return len(prs), nil
+}
+
 // --- Error classification --------------------------------------------------
 
 // IsNotFound reports whether err corresponds to a 404 response.
@@ -310,6 +366,36 @@ func IsUnauthorized(err error) bool {
 		return true
 	}
 	return false
+}
+
+// IsForbiddenNonRateLimit reports a 403 that is NOT primary/secondary
+// rate limiting.  This is the design/09 §"Error handling" "SSO or scope"
+// case: 403 without `X-RateLimit-Remaining: 0` headers.  Callers should
+// surface the actionable message and exit 3.
+//
+// Detection rules:
+//   - go-github classifies primary rate-limit 403 as *RateLimitError and
+//     secondary rate-limit 403 as *AbuseRateLimitError; IsRateLimit(err)
+//     covers both.
+//   - For anything else with status 403, we check whether
+//     X-RateLimit-Remaining is "0".  If yes, it's rate-limit-shaped even
+//     if go-github didn't classify it (e.g., upstream proxy stripped the
+//     reset header).  If no, it's an SSO / scope / org-policy 403.
+func IsForbiddenNonRateLimit(err error) bool {
+	var er *gh.ErrorResponse
+	if !errors.As(err, &er) || er.Response == nil {
+		return false
+	}
+	if er.Response.StatusCode != http.StatusForbidden {
+		return false
+	}
+	if ok, _ := IsRateLimit(err); ok {
+		return false
+	}
+	if er.Response.Header.Get("X-RateLimit-Remaining") == "0" {
+		return false
+	}
+	return true
 }
 
 // IsMalformed reports a 422 / 400 (GitHub's "malformed" responses).

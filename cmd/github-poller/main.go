@@ -24,8 +24,13 @@ func main() {
 	if err := root.Execute(); err != nil {
 		// ErrConfigMissing was already printed verbatim by the run /
 		// force-poll handlers; don't double-print.  See the round-2
-		// agent brief: "exit 1 with the literal message".
-		if !errors.Is(err, ghp.ErrConfigMissing) {
+		// agent brief: "exit 1 with the literal message".  ErrAuthExit
+		// (round 3) is the same story: run/force-poll printed the
+		// actionable stderr line already.  doctorExit{} prints its
+		// own report.
+		if !errors.Is(err, ghp.ErrConfigMissing) &&
+			!errors.Is(err, cli.ErrAuthExit) &&
+			cli.DoctorExitCode(err) == 0 {
 			fmt.Fprintln(os.Stderr, "error:", err)
 		}
 		os.Exit(cli.ExitCodeFor(err))
@@ -94,6 +99,7 @@ Lifecycle subcommands (C6):
 	root.AddCommand(cli.NewUntrackPRCmd(&stateRoot))
 	root.AddCommand(cli.NewStatusCmd(&stateRoot))
 	root.AddCommand(cli.NewForcePollCmd(&stateRoot))
+	root.AddCommand(cli.NewDoctorCmd(&stateRoot))
 
 	// Round-1 binary supported flags directly without a subcommand
 	// (e.g. `github-poller --once`).  Preserve that by inheriting the

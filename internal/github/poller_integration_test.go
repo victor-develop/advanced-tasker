@@ -3,8 +3,10 @@
 package github
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -919,6 +921,170 @@ func TestIntegration_GracefulShutdown_PreservesCompletedCursor(t *testing.T) {
 
 // (See vcr_golden_integration_test.go for the implementation.)
 
+
+// --- Round-3 D2: actionable 401 / 403 surfacing -------------------------
+//
+// At the poller level these surface as wrapped errors ("unauthorized: ..."
+// / "forbidden: ...").  The CLI layer (cli/run.go) catches them and emits
+// the actionable stderr message + exit code 3 — that path is exercised
+// separately in cli/doctor_test.go (TestExitCodeFor_AuthExitIs3) and by
+// the daemon-loop unit below.
+
+func TestIntegration_401Surfaces_UnauthorizedError(t *testing.T) {
+	dir := t.TempDir()
+	api := newFakeAPI(t)
+	now := time.Date(2026, 5, 19, 10, 0, 0, 0, time.UTC)
+
+	api.on("GET", "/repos/acme/api/pulls", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
+	})
+
+	p := newTestPoller(t, dir, api, []string{"acme/api"}, now)
+	_, err := p.RunOnce(context.Background())
+	if err == nil {
+		t.Fatal("expected non-nil error on 401; got nil")
+	}
+	if !strings.Contains(err.Error(), "unauthorized") {
+		t.Errorf("expected error to wrap 'unauthorized'; got %q", err.Error())
+	}
+	// Verify the helper classifies the underlying response correctly.
+	if !IsUnauthorized(errors.Unwrap(err)) {
+		t.Errorf("IsUnauthorized should match the wrapped error; got %v", err)
+	}
+}
+
+func TestIntegration_403NoRateLimit_SurfacesForbiddenError(t *testing.T) {
+	dir := t.TempDir()
+	api := newFakeAPI(t)
+	now := time.Date(2026, 5, 19, 10, 0, 0, 0, time.UTC)
+
+	api.on("GET", "/repos/acme/api/pulls", func(w http.ResponseWriter, r *http.Request) {
+		// 403 with NO rate-limit headers — this is the SSO / scope case.
+		http.Error(w, `{"message":"Resource not accessible by integration"}`, http.StatusForbidden)
+	})
+
+	p := newTestPoller(t, dir, api, []string{"acme/api"}, now)
+	_, err := p.RunOnce(context.Background())
+	if err == nil {
+		t.Fatal("expected non-nil error on 403-non-rate-limit; got nil")
+	}
+	if !strings.Contains(err.Error(), "forbidden") {
+		t.Errorf("expected error to wrap 'forbidden'; got %q", err.Error())
+	}
+	if !IsForbiddenNonRateLimit(errors.Unwrap(err)) {
+		t.Errorf("IsForbiddenNonRateLimit should match the wrapped error; got %v", err)
+	}
+}
+
+func TestIntegration_403RateLimit_StillTreatedAsRateLimit(t *testing.T) {
+	// Regression test: a 403 *with* X-RateLimit-Remaining=0 must NOT be
+	// classified as a forbidden / scope error.  This is the boundary
+	// that distinguishes the two D2 paths.
+	dir := t.TempDir()
+	api := newFakeAPI(t)
+	now := time.Date(2026, 5, 19, 10, 0, 0, 0, time.UTC)
+	reset := now.Add(-1 * time.Second)
+
+	api.on("GET", "/repos/acme/api/pulls", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Limit", "5000")
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", reset.Unix()))
+		http.Error(w, `{"message":"API rate limit exceeded"}`, http.StatusForbidden)
+	})
+
+	p := newTestPoller(t, dir, api, []string{"acme/api"}, now)
+	p.Config.Backoff.OnRateLimit.Duration = 0
+	_, err := p.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("rate-limit 403 should be swallowed inside the cycle; got %v", err)
+	}
+}
+
+// 422 / malformed: skipped for the cycle, anomaly is recorded.
+func TestIntegration_422_RecordsAnomalyAndContinues(t *testing.T) {
+	dir := t.TempDir()
+	api := newFakeAPI(t)
+	now := time.Date(2026, 5, 19, 10, 0, 0, 0, time.UTC)
+
+	api.on("GET", "/repos/acme/api/pulls", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message":"unprocessable"}`, http.StatusUnprocessableEntity)
+	})
+
+	p := newTestPoller(t, dir, api, []string{"acme/api"}, now)
+	stats, err := p.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("422 should not abort the cycle; got %v", err)
+	}
+	if stats.AnomaliesRecorded == 0 {
+		t.Errorf("expected an anomaly to be recorded; got %+v", stats)
+	}
+	// And the anomaly file should be on disk.
+	matches, _ := filepath.Glob(filepath.Join(dir, "inbox", "anomalies", "*list-open-prs*.json"))
+	if len(matches) == 0 {
+		t.Errorf("anomaly file missing under inbox/anomalies/")
+	}
+}
+
+// 404 on a tracked PR: thread archived to _archive/<id>-<UTC stamp>/, the
+// PR cursor dropped, and an anomaly recorded.  This is exercised in the
+// existing TestIntegration_PRDeleted_Archives test (search above for
+// "PR Deleted").  We add an extra assertion that the archive directory
+// uses the round-2-consensus naming `<id>-<UTC-stamp>`.
+func TestIntegration_404ArchiveNamingFinalForR3(t *testing.T) {
+	dir := t.TempDir()
+	api := newFakeAPI(t)
+	now := time.Date(2026, 5, 19, 10, 0, 0, 0, time.UTC)
+	setupTrackedPR(t, dir, 1284)
+
+	api.on("GET", "/repos/acme/api/pulls", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`[]`)) })
+	api.on("GET", "/repos/acme/api/pulls/1284", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+	})
+
+	p := newTestPoller(t, dir, api, []string{"acme/api"}, now)
+	if _, err := p.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	matches, _ := filepath.Glob(filepath.Join(dir, "threads", "_archive", "github-acme-api-pr-1284-*"))
+	if len(matches) != 1 {
+		t.Fatalf("expected exactly 1 archive entry; got %v", matches)
+	}
+	// Confirm the stamp portion is a UTC YYYYMMDDTHHMMSSZ form.
+	base := filepath.Base(matches[0])
+	stamp := strings.TrimPrefix(base, "github-acme-api-pr-1284-")
+	if len(stamp) != len("20060102T150405Z") || !strings.HasSuffix(stamp, "Z") {
+		t.Errorf("archive stamp %q does not look like a UTC yyyymmddThhmmssZ", stamp)
+	}
+}
+
+// Verifies the rate-limit log line format mandated by the round-3 brief:
+//
+//	[rate-limit] sleeping until <iso> (N sec)
+func TestIntegration_RateLimitLogFormat(t *testing.T) {
+	dir := t.TempDir()
+	api := newFakeAPI(t)
+	now := time.Date(2026, 5, 19, 10, 0, 0, 0, time.UTC)
+	reset := now.Add(-1 * time.Second) // already-elapsed reset so sleep is 0
+
+	api.on("GET", "/repos/acme/api/pulls", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Limit", "5000")
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", reset.Unix()))
+		http.Error(w, `{"message":"API rate limit exceeded"}`, http.StatusForbidden)
+	})
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	p := newTestPoller(t, dir, api, []string{"acme/api"}, now)
+	p.Logger = logger
+	p.Config.Backoff.OnRateLimit.Duration = 0
+	if _, err := p.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "[rate-limit] sleeping until") {
+		t.Errorf("expected '[rate-limit] sleeping until' in log; got %s", buf.String())
+	}
+}
 
 func TestIntegration_BoundaryJitter_DedupViaEventID(t *testing.T) {
 	dir := t.TempDir()

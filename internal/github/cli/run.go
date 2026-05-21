@@ -110,6 +110,10 @@ func doRun(stateRoot, cfgPath string, once bool, logLevel, baseURL string) error
 	if once {
 		stats, err := poller.RunOnce(runCtx)
 		if err != nil {
+			if msg, ok := authExitMessage(err, cfg); ok {
+				fmt.Fprintln(os.Stderr, msg)
+				return ErrAuthExit
+			}
 			return fmt.Errorf("cycle failed: %w", err)
 		}
 		logger.Info("cycle complete",
@@ -125,6 +129,32 @@ func doRun(stateRoot, cfgPath string, once bool, logLevel, baseURL string) error
 	}
 
 	return runDaemon(runCtx, logger, cfg, poller, shutdown)
+}
+
+// authExitMessage returns the actionable round-3 message for a 401 or a
+// 403-non-rate-limit error, plus true on match.  The cycle wrapper uses
+// this to print to stderr exactly once and short-circuit to exit code 3
+// via ErrAuthExit.
+func authExitMessage(err error, cfg *ghp.Config) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	envName := ""
+	if cfg != nil {
+		envName = cfg.Auth.TokenEnv
+	}
+	if envName == "" {
+		envName = "GITHUB_TOKEN"
+	}
+	if ghp.IsUnauthorized(err) {
+		return fmt.Sprintf(
+			"github-poller: token invalid (check $%s -- does it have repo scope?)",
+			envName), true
+	}
+	if ghp.IsForbiddenNonRateLimit(err) {
+		return "github-poller: 403 forbidden (check token scopes; org may require SSO authorization)", true
+	}
+	return "", false
 }
 
 // shutdownFlag is a tiny goroutine-safe latch flipped on SIGTERM.
@@ -196,6 +226,13 @@ func runCycleWithBackoff(ctx context.Context, logger *slog.Logger, cfg *ghp.Conf
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil
+		}
+		// Auth/scope errors are terminal — abort the daemon rather than
+		// loop forever sleeping `on_error` because the token won't get
+		// any more valid by waiting.
+		if msg, ok := authExitMessage(err, cfg); ok {
+			fmt.Fprintln(os.Stderr, msg)
+			return ErrAuthExit
 		}
 		logger.Error("cycle errored; sleeping before next attempt",
 			"backoff", cfg.Backoff.OnError.Duration.String(),

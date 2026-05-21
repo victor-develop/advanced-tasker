@@ -26,9 +26,26 @@ func newUsageError(format string, args ...any) error {
 }
 
 // ExitCodeFor maps an error to the conventional shell exit code.
+//
+// Exit code conventions for the binary (round-3 hardening, see brief D2):
+//
+//	0  success
+//	1  missing config / usage error / doctor hard auth failure
+//	2  other failures (IO, validation, doctor soft failure)
+//	3  auth/scope rejection at runtime (401 from the poller, 403 SSO/scope)
+//
+// The 401/403 path runs through ErrAuthExit; doctor explicitly returns a
+// doctorExit{} sentinel whose code wins.
 func ExitCodeFor(err error) int {
 	if err == nil {
 		return 0
+	}
+	// Doctor sentinel wins so we propagate its hard/soft distinction.
+	if code := DoctorExitCode(err); code > 0 {
+		return code
+	}
+	if errors.Is(err, ErrAuthExit) {
+		return 3
 	}
 	if errors.Is(err, ghp.ErrConfigMissing) {
 		return 1
@@ -39,6 +56,12 @@ func ExitCodeFor(err error) int {
 	}
 	return 2
 }
+
+// ErrAuthExit is a sentinel returned by run / force-poll when the poller
+// hits an actionable 401 or 403 (non-rate-limit).  cmd/github-poller maps
+// it to exit code 3.  Callers also print the operator-facing message
+// directly to stderr before returning, so main.go shouldn't double-print.
+var ErrAuthExit = errors.New("github-poller: authentication or authorization failure")
 
 // requireConfig loads the YAML config tree or fails with the literal
 // operator-facing message defined by ErrConfigMissing.  Callers may

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"strconv"
 	"strings"
 
@@ -91,6 +92,10 @@ func DoForcePoll(stateRoot, scope, baseURL, logLevel string) error {
 	}
 	stats, err := poller.RunOnce(context.Background())
 	if err != nil {
+		if msg, ok := authExitMessage(err, cfg); ok {
+			fmt.Fprintln(os.Stderr, msg)
+			return ErrAuthExit
+		}
 		return err
 	}
 	fmt.Printf("force-poll: repos=%d new_prs=%d prs_polled=%d raw_events=%d not_modified=%d anomalies=%d errors=%d\n",
