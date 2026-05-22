@@ -71,10 +71,37 @@ func Dashboard(stateRoot string, opts DashboardOptions) (string, error) {
 func header(b *strings.Builder, opts DashboardOptions) {
 	fmt.Fprintf(b, "=== HARNESS DASHBOARD — %s ===\n", opts.Now.UTC().Format("2006-01-02T15:04Z"))
 	fmt.Fprintf(b, "Token budget: %d / used: ~USED_TOKENS\n", opts.Budget)
-	b.WriteString("You are the COMMANDER. Read in order, then act.\n")
+	b.WriteString("You are the COMMANDER. Read in order, then act.\n\n")
+
+	// Reality + bias-toward-action preamble. Surfaced during the round-3
+	// real-data e2e: when invoked against a live state/, the LLM
+	// repeatedly treated real inbox items as fictitious and chose
+	// `--idle`, costing budget for zero work. These three lines force
+	// the model out of "this is a hypothetical" mode and bias it toward
+	// dispatching workers (cheap) over deferring (expensive in
+	// opportunity cost).
+	b.WriteString("REALITY: The signals you see below in inbox/, threads/, and tasks/ are REAL.\n")
+	b.WriteString("They reflect actual messages, PRs, and goals. Do not treat them as\n")
+	b.WriteString("hypothetical or as test fixtures. Act on them.\n\n")
+	b.WriteString("IDLE IS THE EXCEPTION: Calling `harness tick end --idle` is only\n")
+	b.WriteString("appropriate when ALL inbox items have already been triaged, ALL\n")
+	b.WriteString("pending reviews have been actioned, and no task needs re-prioritization\n")
+	b.WriteString("given the new signals. If any inbox item is unhandled, you MUST triage\n")
+	b.WriteString("it before ending the tick. Idle is the exception, not the default.\n\n")
+	b.WriteString("WHEN UNSURE, ACT: Prefer dispatching a worker (cheap) over deferring\n")
+	b.WriteString("(expensive in opportunity cost). You can always reject the worker's\n")
+	b.WriteString("report next tick.\n\n")
+
 	b.WriteString("Phases: Survey → Drill → Reconcile → Act → Log → Exit.\n")
 	b.WriteString("DO NOT skip phases. DO NOT spawn subprocesses that wait for replies.\n")
 	b.WriteString("All side effects via `harness <cmd>`.\n\n")
+	b.WriteString("Phase 3 (Reconcile) is concrete: EVERY inbox item below must be passed\n")
+	b.WriteString("through `harness triage <id> --action=...` (drop|track|attach|task) before\n")
+	b.WriteString("you can end this tick non-idle. Do not skim.\n\n")
+	b.WriteString("Phase 4 (Act) is concrete: for EVERY task in `ready` state, evaluate\n")
+	b.WriteString("whether to dispatch a worker, defer, or leave for next tick. Make that\n")
+	b.WriteString("evaluation explicit in the tick-log narrative — don't silently leave\n")
+	b.WriteString("ready tasks sitting.\n\n")
 }
 
 func pinnedSection(b *strings.Builder, stateRoot string) {

@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -40,5 +42,56 @@ func TestAutopilotFakeDriverShortRun(t *testing.T) {
 	a, _ := os.ReadDir(filepath.Join(root, "audit", "reports"))
 	if len(a) == 0 {
 		t.Errorf("expected at least one audit report")
+	}
+}
+
+// TestSummaryLog_OneLinePerTick is the regression test for the round-2
+// e2e finding that telemetry/summary.log received two lines per tick
+// (once from the scheduler, once from `harness tick end`). After the
+// polish fix, `harness tick end` is the single writer and the scheduler
+// passes session_id / is_error through as flags.
+func TestSummaryLog_OneLinePerTick(t *testing.T) {
+	root := initState(t)
+
+	summary := filepath.Join(root, "telemetry", "summary.log")
+	if _, err := os.Stat(summary); !os.IsNotExist(err) {
+		// init may have created an empty file or not — measure delta.
+		_ = os.Remove(summary)
+	}
+
+	// One scheduler-like end-to-end: start a tick, end it with the
+	// flags the scheduler passes in production.
+	_, _, code := runCLI(t, root, "tick", "start", "--as", "test-agent", "--ttl", "1m")
+	if code != ExitOK {
+		t.Fatalf("tick start: %d", code)
+	}
+	_, _, code = runCLI(t, root, "tick", "end", "--idle",
+		"--cost-usd=0.0123",
+		"--duration-ms=4567",
+		"--session-id=test-session-abc",
+	)
+	if code != ExitOK {
+		t.Fatalf("tick end: %d", code)
+	}
+
+	b, err := os.ReadFile(summary)
+	if err != nil {
+		t.Fatalf("read summary.log: %v", err)
+	}
+	// Count non-empty lines.
+	lines := bytes.Split(bytes.TrimRight(b, "\n"), []byte("\n"))
+	n := 0
+	for _, ln := range lines {
+		if len(bytes.TrimSpace(ln)) > 0 {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("summary.log lines = %d, want 1\n--full--\n%s", n, b)
+	}
+
+	// And the line carries the session_id we passed (not empty).
+	if !strings.Contains(string(b), "session=test-session-abc") {
+		t.Errorf("summary.log missing session=test-session-abc\n%s", b)
 	}
 }

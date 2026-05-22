@@ -89,3 +89,43 @@ func TestClaudePParseStreamJSON(t *testing.T) {
 		t.Errorf("session: %q", r.SessionID)
 	}
 }
+
+// TestAllowedToolsFor guards the polish-round-1 fix that grants
+// `claude -p` subprocesses the right tool scope per role. Without this,
+// the commander cannot call `harness` and stays idle forever.
+func TestAllowedToolsFor(t *testing.T) {
+	cases := []struct {
+		role     Role
+		mustHave []string
+		mustNot  []string
+	}{
+		{RoleCommander, []string{"Bash(harness:*)", "Read"}, []string{"Edit", "Write"}},
+		{RoleWorker, []string{"Bash(harness:*)", "Read", "Edit", "Write"}, nil},
+		{RoleAuditor, []string{"Bash(harness audit:*)", "Read"}, []string{"Edit", "Write", "Bash(harness:*)"}},
+		// Updater is text-only — no tools means no flag passed, which
+		// is exactly what we want.
+		{RoleUpdater, nil, []string{"Bash", "Read", "Edit"}},
+	}
+	for _, c := range cases {
+		t.Run(string(c.role), func(t *testing.T) {
+			got := allowedToolsFor(c.role)
+			set := make(map[string]bool)
+			for _, s := range got {
+				set[s] = true
+			}
+			for _, want := range c.mustHave {
+				if !set[want] {
+					t.Errorf("%s: missing %q\nhave %v", c.role, want, got)
+				}
+			}
+			for _, wantNot := range c.mustNot {
+				if set[wantNot] {
+					t.Errorf("%s: should not contain %q\nhave %v", c.role, wantNot, got)
+				}
+			}
+			if c.role == RoleUpdater && len(got) != 0 {
+				t.Errorf("%s: expected nil/empty, got %v", c.role, got)
+			}
+		})
+	}
+}
