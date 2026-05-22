@@ -63,6 +63,8 @@ func newTickCmd(opts *Options) *cobra.Command {
 	var summary string
 	var costUSD float64
 	var durMS int64
+	var sessionID string
+	var isError bool
 	end := &cobra.Command{
 		Use:   "end",
 		Short: "Finalize tick log and release commander",
@@ -84,7 +86,7 @@ func newTickCmd(opts *Options) *cobra.Command {
 				if err := tick.FinalizeLog(p, durMS, costUSD, idle, st.ConsecutiveIdle, summary); err != nil {
 					return errf(ExitValidation, "%v", err)
 				}
-				_ = telemetry.AppendSummary(root, "tick", costUSD, durMS, false, "")
+				_ = telemetry.AppendSummary(root, "tick", costUSD, durMS, isError, sessionID)
 				r := gitops.Repo{Dir: root}
 				_ = r.Add(strings.TrimPrefix(p, root+"/"))
 				_, _ = r.Commit(fmt.Sprintf("tick end: %s", summary))
@@ -98,6 +100,8 @@ func newTickCmd(opts *Options) *cobra.Command {
 	end.Flags().StringVar(&summary, "summary", "", "tick summary text")
 	end.Flags().Float64Var(&costUSD, "cost-usd", 0, "tick cost in USD")
 	end.Flags().Int64Var(&durMS, "duration-ms", 0, "tick duration in ms")
+	end.Flags().StringVar(&sessionID, "session-id", "", "stream-json session id (autopilot scheduler passes this)")
+	end.Flags().BoolVar(&isError, "is-error", false, "stream-json result.is_error (autopilot scheduler passes this)")
 	c.AddCommand(end)
 
 	return c

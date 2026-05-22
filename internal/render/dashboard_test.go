@@ -134,6 +134,37 @@ func writeFakeInbox(root, bucket, name string) error {
 // TestDashboard_CommandsCheatSheet verifies the AVAILABLE COMMANDS block
 // matches design/04 verbatim and that the round-1 MVP placeholder line
 // is no longer rendered (round-3 D1).
+// TestDashboard_BiasTowardActionPreamble guards the polish-round-1 fix
+// for the round-2 real-data finding that the commander LLM treated real
+// inbox items as fictitious and chose --idle. The header must contain
+// three explicit reality / non-idle / bias-toward-action directives plus
+// concrete Phase 3 / Phase 4 obligations.
+func TestDashboard_BiasTowardActionPreamble(t *testing.T) {
+	root := t.TempDir() + "/state"
+	if err := state.Init(root); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Dashboard(root, DashboardOptions{Budget: 8000, Now: fixedNow})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wants := []string{
+		"REALITY: The signals you see below in inbox/, threads/, and tasks/ are REAL.",
+		"hypothetical or as test fixtures. Act on them.",
+		"IDLE IS THE EXCEPTION:",
+		"If any inbox item is unhandled, you MUST triage",
+		"WHEN UNSURE, ACT:",
+		"Prefer dispatching a worker (cheap) over deferring",
+		"Phase 3 (Reconcile) is concrete: EVERY inbox item below must be passed",
+		"Phase 4 (Act) is concrete: for EVERY task in `ready` state",
+	}
+	for _, w := range wants {
+		if !strings.Contains(got, w) {
+			t.Errorf("dashboard missing preamble line %q\n--- got ---\n%s", w, got)
+		}
+	}
+}
+
 func TestDashboard_CommandsCheatSheet(t *testing.T) {
 	root := t.TempDir() + "/state"
 	if err := state.Init(root); err != nil {

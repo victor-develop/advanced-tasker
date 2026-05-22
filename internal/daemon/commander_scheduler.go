@@ -10,7 +10,6 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/victor-develop/advanced-tasker/internal/llm"
-	"github.com/victor-develop/advanced-tasker/internal/telemetry"
 )
 
 // CommanderScheduler ticks the commander at the configured cadence
@@ -65,16 +64,23 @@ func (s *CommanderScheduler) runOnce(ctx context.Context) error {
 		Timeout:        2 * time.Minute,
 		StreamJSONPath: streamPath,
 	})
-	_ = telemetry.AppendSummary(s.Bus.StateRoot, "tick", res.CostUSD, res.DurationMS, res.IsError, res.SessionID)
 	// Append the LLM's narrative to the tick log (best-effort).
 	if res.Output != "" {
 		_, _, _ = runHarness(s.Bus, "", "tick-log", "append", res.Output)
 	}
-	// Finalize.
-	_, _, _ = runHarness(s.Bus, "", "tick", "end", "--idle",
+	// Finalize. `harness tick end` is now the single writer of
+	// telemetry/summary.log per tick (was duplicated here — see
+	// design/10 §"Telemetry capture"). Pass session_id and is_error
+	// through so the line carries the full record.
+	endArgs := []string{"tick", "end", "--idle",
 		fmt.Sprintf("--cost-usd=%g", res.CostUSD),
 		fmt.Sprintf("--duration-ms=%d", res.DurationMS),
-	)
+		fmt.Sprintf("--session-id=%s", res.SessionID),
+	}
+	if res.IsError {
+		endArgs = append(endArgs, "--is-error")
+	}
+	_, _, _ = runHarness(s.Bus, "", endArgs...)
 	return nil
 }
 
