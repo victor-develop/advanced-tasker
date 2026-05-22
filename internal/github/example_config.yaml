@@ -1,0 +1,22 @@
+# Stub config produced by `harness config init github` and consumed by the
+# `github-poller` binary.  See design/09 §Configuration for the field
+# meanings.  After seeding, populate `watch.repos` via either:
+#
+#   harness watch github-repo <owner/repo>     # via Track A's CLI
+#   github-poller watch <owner/repo>           # via Track C's CLI (this binary)
+#
+# Both verbs write to this file; the poller reloads it on each --once
+# invocation (daemon mode reloads on SIGHUP — currently unimplemented;
+# restart for now).
+auth:
+  token_env: GITHUB_TOKEN          # env var holding the PAT
+  type: pat                        # pat | app  (only pat supported in MVP)
+watch:
+  repos: []                        # e.g. ["acme/api", "acme/ingest"]
+poll_interval: 60s                 # tracked-PR poll cadence
+new_pr_lookback: 7d                # lookback window for discovery scan
+max_concurrent_pr_polls: 4         # bounded goroutine pool size
+backoff:
+  on_rate_limit: 60s               # used only when X-RateLimit-Reset is unset
+  on_error: 5s
+  max_backoff: 5m

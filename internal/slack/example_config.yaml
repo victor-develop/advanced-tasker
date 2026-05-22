@@ -1,0 +1,36 @@
+# Example state/sources/slack/config.yaml for the slack-poller daemon.
+# Copy this file to <state-root>/sources/slack/config.yaml and edit.
+#
+# Schema authoritative source: design/02-state-and-schemas.md
+#                              design/08-slack-poller.md
+auth:
+  # Name of the env var holding the Slack bot token. The poller exits on
+  # startup if the env var is unset and no inline token / token_file is
+  # provided.
+  token_env: SLACK_BOT_TOKEN
+  # Alternative: read token from a file (gitignore the file).
+  # token_file: /etc/slack-poller/token
+  # Alternative: inline (testing only — never commit a real token).
+  # token: xoxb-...
+
+watch:
+  channels:
+    - id: C0492
+      reason: "data team alerts"
+    - id: C1234
+      reason: "PR notifications"
+
+# How often the daemon loop runs a full poll cycle.
+poll_interval: 30s
+
+# Max parallel conversations.replies fetches in one poll cycle.
+max_concurrent_thread_polls: 4
+
+backoff:
+  on_rate_limit: 60s
+  on_error: 5s
+  max_backoff: 5m
+
+# Optional: write lightweight state/inbox/updates/ pings when a tracked
+# thread receives new replies. Disabled by default.
+# write_update_pings: false
