@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -20,14 +21,18 @@ import (
 	"github.com/victor-develop/advanced-tasker/internal/store"
 )
 
-// bootEnvVars lists the env-vars `harness boot` reports on. Driver-side
-// env-var checks (e.g. ANTHROPIC_API_KEY) live in internal/llm — boot
-// only probes presence to inform the operator.
-var bootEnvVars = []string{
-	"ANTHROPIC_API_KEY",
+// bootProviderEnvVars lists the per-source provider tokens that boot
+// reports on. The LLM driver is probed separately (see probeLLMDriver)
+// because `claude-p` authenticates via Claude Code's OAuth — there is
+// no env-var equivalent of `ANTHROPIC_API_KEY` to check for.
+var bootProviderEnvVars = []string{
 	"SLACK_BOT_TOKEN",
 	"GITHUB_TOKEN",
 }
+
+// lookPath is the indirection point for tests that want to stub the
+// `claude` PATH lookup. Default: stdlib exec.LookPath.
+var lookPath = exec.LookPath
 
 // newBootCmd implements `harness boot`: the interactive first-run that
 // detects state + env, walks the operator through opt-in watches, seeds
@@ -44,7 +49,9 @@ func newBootCmd(opts *Options) *cobra.Command {
 		Long: `harness boot walks an operator through the first-run setup:
 
   1. Detects (and optionally creates) the state directory.
-  2. Probes ANTHROPIC_API_KEY / SLACK_BOT_TOKEN / GITHUB_TOKEN presence.
+  2. Probes the configured LLM driver (claude-p → checks 'claude' on
+     PATH; fake → no credential needed) and the per-source tokens
+     SLACK_BOT_TOKEN / GITHUB_TOKEN.
   3. Offers to watch one Slack channel and one GitHub repo (only if the
      matching token is set).
   4. Creates a first goal (default title: "My first goal").
@@ -95,18 +102,19 @@ func runBoot(opts *Options, in io.Reader, out io.Writer, nonInteractive bool, de
 		fmt.Fprintf(out, "[ok] state directory %s is initialized.\n", root)
 	}
 
-	// Step 2: env probe.
+	// Step 2a: LLM driver capability probe. claude-p authenticates via
+	// Claude Code's OAuth login — there is no env var equivalent of an
+	// API key to check. We only verify the `claude` binary is present
+	// on PATH and point the operator at `claude /login` if it is not.
+	// The fake driver needs no credentials at all.
+	probeLLMDriver(root, out)
+
+	// Step 2b: per-source provider tokens.
 	envStatus := map[string]bool{}
-	for _, name := range bootEnvVars {
+	for _, name := range bootProviderEnvVars {
 		v := os.Getenv(name)
 		envStatus[name] = v != ""
 		switch name {
-		case "ANTHROPIC_API_KEY":
-			if v == "" {
-				fmt.Fprintf(out, "[missing] ANTHROPIC_API_KEY is not set — autopilot will need --driver fake until you set it.\n")
-			} else {
-				fmt.Fprintf(out, "[ok] ANTHROPIC_API_KEY is set\n")
-			}
 		case "SLACK_BOT_TOKEN":
 			if v == "" {
 				fmt.Fprintf(out, "[missing] SLACK_BOT_TOKEN is not set — Slack will be skipped\n")
@@ -305,4 +313,36 @@ func commitConfig(root, relPath, msg string) {
 	r := gitops.Repo{Dir: root}
 	_ = r.Add(relPath)
 	_, _ = r.Commit(msg)
+}
+
+// probeLLMDriver inspects state/config.yaml `models.driver` and emits
+// one status line describing what credentials boot expects.
+//
+// Driver semantics:
+//   - claude-p (production): execs `claude --print --output-format
+//     stream-json` and inherits Claude Code's OAuth login. No env var
+//     to check; just confirm the binary is on PATH.
+//   - fake: scripted file-backed driver (internal/llm.Fake). No
+//     credentials needed.
+//   - anything else: emit a neutral line so the operator knows boot
+//     did not validate the driver.
+//
+// We deliberately do NOT exec `claude` to verify auth — that's flaky
+// and slow for an interactive boot probe. Presence + a pointer at
+// `claude /login` is the right level of detail.
+func probeLLMDriver(root string, out io.Writer) {
+	driver := configDriverName(root)
+	switch driver {
+	case "claude-p":
+		path, err := lookPath("claude")
+		if err != nil {
+			fmt.Fprintf(out, "[missing] 'claude' CLI not found on PATH — install Claude Code or set models.driver=fake to test offline\n")
+			return
+		}
+		fmt.Fprintf(out, "[ok] claude CLI found at %s (used by claude-p driver; auth managed via 'claude /login')\n", path)
+	case "fake":
+		fmt.Fprintf(out, "[ok] fake driver selected — no LLM credentials needed\n")
+	default:
+		fmt.Fprintf(out, "[note] models.driver=%q — boot did not probe this driver's credentials\n", driver)
+	}
 }

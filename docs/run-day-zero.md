@@ -8,13 +8,13 @@ operator notes only.
 
 ## 1. Prereqs
 
-You need three env vars. Only the first is mandatory.
+You need one CLI logged in, and optionally two env vars.
 
-| Env var | Required? | Where to get it |
+| Prereq | Required? | How to satisfy it |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | yes — the commander/auditor/updater all call this | <https://console.anthropic.com/settings/keys> |
-| `SLACK_BOT_TOKEN` | optional — Slack-poller will be skipped without it | Slack app config → OAuth & Permissions → `xoxb-...` |
-| `GITHUB_TOKEN` | optional — GitHub-poller will be skipped without it | `gh auth token`, or a fine-grained PAT with PR read scope |
+| `claude` CLI logged in (run `claude /login` if needed) | yes — the production driver `claude-p` execs `claude --print --output-format stream-json` and inherits its OAuth auth | Install Claude Code, then `claude /login`. No API key env var needed. |
+| `SLACK_BOT_TOKEN` env var | optional — Slack-poller will be skipped without it | Slack app config → OAuth & Permissions → `xoxb-...` |
+| `GITHUB_TOKEN` env var | optional — GitHub-poller will be skipped without it | `gh auth token`, or a fine-grained PAT with PR read scope |
 
 Install the three binaries (Track A core + the two pollers):
 
@@ -45,7 +45,7 @@ $ harness boot
 > Run `harness init` at /Users/you/state? [Y/n]
 > 
 [ok] initialized state at /Users/you/state
-[ok] ANTHROPIC_API_KEY is set
+[ok] claude CLI found at /usr/local/bin/claude (used by claude-p driver; auth managed via 'claude /login')
 [ok] SLACK_BOT_TOKEN is set
 [missing] GITHUB_TOKEN is not set — GitHub will be skipped
 > Watch a Slack channel? Enter channel ID (e.g. C0492) or blank to skip:
