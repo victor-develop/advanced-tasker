@@ -12,6 +12,7 @@ import (
 	"github.com/victor-develop/advanced-tasker/internal/gitops"
 	"github.com/victor-develop/advanced-tasker/internal/inbox"
 	"github.com/victor-develop/advanced-tasker/internal/outbox"
+	slackpkg "github.com/victor-develop/advanced-tasker/internal/slack"
 	"github.com/victor-develop/advanced-tasker/internal/state"
 )
 
@@ -104,15 +105,44 @@ func (s *OutboxSender) process(id string) error {
 			return nil
 		}
 		var resp map[string]any
-		if s.ProviderSend != nil {
+		switch {
+		case s.ProviderSend != nil:
 			r, perr := s.ProviderSend(it)
 			if perr != nil {
 				return s.handleFailure(it, perr)
 			}
 			resp = r
-		} else {
-			// Default stub: pretend the provider accepted.
-			resp = map[string]any{"provider": it.To, "stubbed": true}
+		case it.To == "slack":
+			// Real Slack send via slack-go. Resolve the bot token from
+			// state/sources/slack/config.yaml (which itself supports env,
+			// inline, or file token sources). Body is read from the
+			// outbox item's body_file path (relative to state root).
+			cfgPath := filepath.Join(root, "sources", "slack", "config.yaml")
+			cfg, err := slackpkg.LoadConfig(cfgPath)
+			if err != nil {
+				return s.handleFailure(it, fmt.Errorf("slack config: %w", err))
+			}
+			token, err := cfg.ResolveToken()
+			if err != nil {
+				return s.handleFailure(it, fmt.Errorf("slack token: %w", err))
+			}
+			bodyText, err := readOutboxBody(root, it)
+			if err != nil {
+				return s.handleFailure(it, fmt.Errorf("body: %w", err))
+			}
+			r, perr := outbox.SlackProviderSend(token, bodyText, it)
+			if perr != nil {
+				return s.handleFailure(it, perr)
+			}
+			resp = r
+		default:
+			// No provider wired for this `to` value (e.g. github-pr-*
+			// hasn't shipped a real provider in this polish round). The
+			// item stays in pending with an anomaly so the operator
+			// notices.
+			s.Bus.Log("outbox-sender %s: no provider for to=%s", id, it.To)
+			_, _ = inbox.AppendAnomaly(root, "outbox:"+id, fmt.Sprintf("no provider implemented for to=%s", it.To))
+			return nil
 		}
 		it.SentAt = time.Now().UTC()
 		it.SenderResponse = resp
@@ -128,6 +158,27 @@ func (s *OutboxSender) process(id string) error {
 		s.Bus.Log("outbox-sender %s: sent", id)
 		return nil
 	})
+}
+
+// readOutboxBody resolves the body content for an outbox item, preferring
+// the inline `body` field then falling back to reading body_file (which
+// may be absolute or relative to the state root).
+func readOutboxBody(root string, it *outbox.Item) (string, error) {
+	if it.Body != "" {
+		return it.Body, nil
+	}
+	if it.BodyFile == "" {
+		return "", fmt.Errorf("neither body nor body_file set")
+	}
+	path := it.BodyFile
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(root, path)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }
 
 func (s *OutboxSender) handleFailure(it *outbox.Item, perr error) error {
